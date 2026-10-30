@@ -267,9 +267,10 @@ export class WorkspaceRepo {
         for (const o of offers) {
           if (!o?.id || seen.has(o.id)) continue;
           seen.add(o.id);
+          const originOrderId = o.originOrderId || o.metadata?.originOrderId || o.orderId;
           const mergedMetadata = {
             ...(o.metadata || {}),
-            originOrderId: o.originOrderId || o.metadata?.originOrderId || o.orderId,
+            ...(originOrderId ? { originOrderId } : {}),
             ...(o.resultingOrderId !== undefined
               ? { resultingOrderId: o.resultingOrderId }
               : (o.metadata?.resultingOrderId ? { resultingOrderId: o.metadata.resultingOrderId } : {})),
@@ -303,7 +304,7 @@ export class WorkspaceRepo {
               resolved_by = EXCLUDED.resolved_by,
               metadata = EXCLUDED.metadata`,
             [
-              o.id, o.number, o.orderId || o.workspaceId || null, o.workspaceId || null, o.kind, o.title, o.amount,
+              o.id, o.number, o.orderId || null, o.workspaceId || null, o.kind, o.title, o.amount,
               o.deliveryDays ?? null, o.status, o.createdBy, o.createdAt,
               o.resolvedAt || null, o.resolvedBy || null, JSON.stringify(mergedMetadata)
             ]
@@ -322,9 +323,10 @@ export class WorkspaceRepo {
   async saveOffer(offer: WorkstreamOffer, client?: any): Promise<void> {
     if (client) {
       if (!offer?.id) return;
+      const originOrderId = offer.originOrderId || offer.metadata?.originOrderId || offer.orderId;
       const mergedMetadata = {
         ...(offer.metadata || {}),
-        originOrderId: offer.originOrderId || offer.metadata?.originOrderId || offer.orderId,
+        ...(originOrderId ? { originOrderId } : {}),
         ...(offer.resultingOrderId !== undefined
           ? { resultingOrderId: offer.resultingOrderId }
           : (offer.metadata?.resultingOrderId ? { resultingOrderId: offer.metadata.resultingOrderId } : {})),
@@ -358,7 +360,7 @@ export class WorkspaceRepo {
           resolved_by = EXCLUDED.resolved_by,
           metadata = EXCLUDED.metadata`,
         [
-          offer.id, offer.number, offer.orderId || offer.workspaceId || null, offer.workspaceId || null, offer.kind, offer.title, offer.amount,
+          offer.id, offer.number, offer.orderId || null, offer.workspaceId || null, offer.kind, offer.title, offer.amount,
           offer.deliveryDays ?? null, offer.status, offer.createdBy, offer.createdAt,
           offer.resolvedAt || null, offer.resolvedBy || null, JSON.stringify(mergedMetadata)
         ]
