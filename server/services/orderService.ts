@@ -104,109 +104,115 @@ export function saveUsersToPostgres() { return Promise.resolve(); }
 export function saveGigsToPostgres() { return Promise.resolve(); }
 
 export async function syncUserBalances(userIds?: string[], externalClient?: any) {
-  const dbRunner = externalClient || postgresStore.getPool();
-  const useSavepoint = Boolean(externalClient);
-  const spName = 'sp_sync_user_balances';
-  try {
-    if (useSavepoint) {
-      await dbRunner.query(`SAVEPOINT ${spName}`);
-    }
-    const hasSpecificUsers = Array.isArray(userIds) && userIds.length > 0;
+  const runSync = async (client: any, isSavepoint: boolean) => {
+    const spName = 'sp_sync_user_balances';
+    try {
+      if (isSavepoint) {
+        await client.query(`SAVEPOINT ${spName}`);
+      }
+      const hasSpecificUsers = Array.isArray(userIds) && userIds.length > 0;
 
-    if (hasSpecificUsers) {
-      const distinctIds = Array.from(new Set(userIds.filter(Boolean))).sort();
-      if (distinctIds.length > 0) {
-        // Unified Lock Order: 1. Lock Active Escrows sorted by order_id ASC
-        await dbRunner.query(`SELECT order_id FROM escrows WHERE buyer_id = ANY($1::text[]) AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`, [distinctIds]);
-        // 2. Lock Wallets sorted by user_id ASC
-        await dbRunner.query(`SELECT user_id FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE`, [distinctIds]);
+      if (hasSpecificUsers) {
+        const distinctIds = Array.from(new Set(userIds.filter(Boolean))).sort();
+        if (distinctIds.length > 0) {
+          // Unified Lock Order: 1. Lock Active Escrows sorted by order_id ASC
+          await client.query(`SELECT order_id FROM escrows WHERE buyer_id = ANY($1::text[]) AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`, [distinctIds]);
+          // 2. Lock Wallets sorted by user_id ASC
+          await client.query(`SELECT user_id FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE`, [distinctIds]);
 
-        await dbRunner.query(`
+          await client.query(`
+            UPDATE users u
+            SET wallet_balance = w.available_balance
+            FROM wallets w
+            WHERE u.id = w.user_id
+              AND u.id = ANY($1::text[])
+              AND u.wallet_balance IS DISTINCT FROM w.available_balance
+          `, [distinctIds]);
+
+          await client.query(`
+            UPDATE users u
+            SET earned = COALESCE(ec.total_earned, 0)
+            FROM (
+              SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
+              FROM users u2
+              LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
+              WHERE u2.id = ANY($1::text[])
+              GROUP BY u2.id
+            ) ec
+            WHERE u.id = ec.user_id
+              AND u.earned IS DISTINCT FROM ec.total_earned
+          `, [distinctIds]);
+
+          await client.query(`
+            UPDATE wallets w
+            SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
+            FROM (
+              SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
+              FROM wallets w2
+              LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
+              WHERE w2.user_id = ANY($1::text[])
+              GROUP BY w2.user_id
+            ) e
+            WHERE w.user_id = e.user_id
+              AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
+          `, [distinctIds]);
+        }
+      } else {
+        // Unified Lock Order: 1. Lock all Active Escrows sorted by order_id ASC
+        await client.query(`SELECT order_id FROM escrows WHERE status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`);
+        // 2. Lock all Wallets sorted by user_id ASC
+        await client.query(`SELECT user_id FROM wallets ORDER BY user_id ASC FOR UPDATE`);
+
+        await client.query(`
           UPDATE users u
           SET wallet_balance = w.available_balance
           FROM wallets w
           WHERE u.id = w.user_id
-            AND u.id = ANY($1::text[])
             AND u.wallet_balance IS DISTINCT FROM w.available_balance
-        `, [distinctIds]);
+        `);
 
-        await dbRunner.query(`
+        await client.query(`
           UPDATE users u
           SET earned = COALESCE(ec.total_earned, 0)
           FROM (
             SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
             FROM users u2
             LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
-            WHERE u2.id = ANY($1::text[])
             GROUP BY u2.id
           ) ec
           WHERE u.id = ec.user_id
             AND u.earned IS DISTINCT FROM ec.total_earned
-        `, [distinctIds]);
+        `);
 
-        await dbRunner.query(`
+        await client.query(`
           UPDATE wallets w
           SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
           FROM (
             SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
             FROM wallets w2
             LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
-            WHERE w2.user_id = ANY($1::text[])
             GROUP BY w2.user_id
           ) e
           WHERE w.user_id = e.user_id
             AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
-        `, [distinctIds]);
+        `);
       }
-    } else {
-      // Unified Lock Order: 1. Lock all Active Escrows sorted by order_id ASC
-      await dbRunner.query(`SELECT order_id FROM escrows WHERE status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`);
-      // 2. Lock all Wallets sorted by user_id ASC
-      await dbRunner.query(`SELECT user_id FROM wallets ORDER BY user_id ASC FOR UPDATE`);
-
-      await dbRunner.query(`
-        UPDATE users u
-        SET wallet_balance = w.available_balance
-        FROM wallets w
-        WHERE u.id = w.user_id
-          AND u.wallet_balance IS DISTINCT FROM w.available_balance
-      `);
-
-      await dbRunner.query(`
-        UPDATE users u
-        SET earned = COALESCE(ec.total_earned, 0)
-        FROM (
-          SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
-          FROM users u2
-          LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
-          GROUP BY u2.id
-        ) ec
-        WHERE u.id = ec.user_id
-          AND u.earned IS DISTINCT FROM ec.total_earned
-      `);
-
-      await dbRunner.query(`
-        UPDATE wallets w
-        SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
-        FROM (
-          SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
-          FROM wallets w2
-          LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
-          GROUP BY w2.user_id
-        ) e
-        WHERE w.user_id = e.user_id
-          AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
-      `);
+      if (isSavepoint) {
+        await client.query(`RELEASE SAVEPOINT ${spName}`);
+      }
+    } catch (err) {
+      if (isSavepoint) {
+        try { await client.query(`ROLLBACK TO SAVEPOINT ${spName}`); } catch {}
+      }
+      console.error('[syncUserBalances] Error syncing balances:', err);
+      throw err;
     }
-    if (useSavepoint) {
-      await dbRunner.query(`RELEASE SAVEPOINT ${spName}`);
-    }
-  } catch (err) {
-    if (useSavepoint) {
-      try { await dbRunner.query(`ROLLBACK TO SAVEPOINT ${spName}`); } catch {}
-    }
-    console.error('[syncUserBalances] Error syncing balances:', err);
-    throw err;
+  };
+
+  if (externalClient) {
+    return runSync(externalClient, true);
+  } else {
+    return postgresStore.executeInTransaction((client) => runSync(client, false));
   }
 }
 

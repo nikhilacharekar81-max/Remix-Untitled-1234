@@ -1091,10 +1091,17 @@ export class FinancialTransactionService {
       }
       const escrow = escRes.rows[0];
 
+      // Lock all active escrows for the buyer in deterministic order BEFORE locking wallets
+      const activeEscRows = await client.query(
+        "SELECT order_id, remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE",
+        [escrow.buyer_id]
+      );
+      const authoritativeHold = Number(activeEscRows.rows.reduce((sum: number, r: any) => sum + Number(r.remaining || 0), 0).toFixed(2));
+
       await this.ensureWallet({ userId: escrow.buyer_id, role: 'buyer' }, client);
       await this.ensureWallet({ userId: escrow.seller_id, role: 'freelancer' }, client);
 
-      // Consistent Lock Order: Lock buyer & seller wallets in sorted order by user_id
+      // Consistent Lock Order: Lock buyer & seller wallets in sorted order by user_id AFTER escrows are locked
       const walletUserIds = Array.from(new Set([escrow.buyer_id, escrow.seller_id])).sort();
       const lockedWalletsRes = await client.query('SELECT * FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE', [walletUserIds]);
       const buyerWallet = lockedWalletsRes.rows.find((w: any) => w.user_id === escrow.buyer_id);
@@ -1117,17 +1124,12 @@ export class FinancialTransactionService {
       const gross = Number(escrow.remaining);
       assertValidMoneyAmount(gross, 'escrow remaining balance');
 
-      // Verify buyer wallet hold invariant and reconcile safely under lock if needed
+      // Verify buyer wallet hold invariant against authoritative held escrows locked above
       let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
       if (buyerHold < gross) {
-        const activeEscRows = await client.query(
-          "SELECT order_id, remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE",
-          [escrow.buyer_id]
-        );
-        const reconciledHold = Number(activeEscRows.rows.reduce((sum: number, r: any) => sum + Number(r.remaining || 0), 0).toFixed(2));
-        if (reconciledHold >= gross) {
-          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [reconciledHold, escrow.buyer_id]);
-          buyerHold = reconciledHold;
+        if (authoritativeHold >= gross) {
+          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [authoritativeHold, escrow.buyer_id]);
+          buyerHold = authoritativeHold;
         } else {
           throw new Error(`Cannot release escrow for order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is insufficient for release ($${gross.toFixed(2)}).`);
         }
@@ -1260,10 +1262,17 @@ export class FinancialTransactionService {
         }
       }
 
+      // Lock all active escrows for the buyer in deterministic order BEFORE locking wallets
+      const activeEscRows = await client.query(
+        "SELECT order_id, remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE",
+        [escrow.buyer_id]
+      );
+      const authoritativeHold = Number(activeEscRows.rows.reduce((sum: number, r: any) => sum + Number(r.remaining || 0), 0).toFixed(2));
+
       await this.ensureWallet({ userId: escrow.buyer_id, role: 'buyer' }, client);
       await this.ensureWallet({ userId: escrow.seller_id, role: 'freelancer' }, client);
 
-      // Consistent Lock Order: Lock buyer & seller wallets in sorted order by user_id
+      // Consistent Lock Order: Lock buyer & seller wallets in sorted order by user_id AFTER escrows are locked
       const walletUserIds = Array.from(new Set([escrow.buyer_id, escrow.seller_id])).sort();
       const lockedWalletsRes = await client.query('SELECT * FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE', [walletUserIds]);
       const buyerWallet = lockedWalletsRes.rows.find((w: any) => w.user_id === escrow.buyer_id);
@@ -1291,14 +1300,9 @@ export class FinancialTransactionService {
       // Verify buyer wallet hold invariant and reconcile safely under lock if needed
       let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
       if (buyerHold < refundAmount) {
-        const activeEscRows = await client.query(
-          "SELECT order_id, remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE",
-          [escrow.buyer_id]
-        );
-        const reconciledHold = Number(activeEscRows.rows.reduce((sum: number, r: any) => sum + Number(r.remaining || 0), 0).toFixed(2));
-        if (reconciledHold >= refundAmount) {
-          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [reconciledHold, escrow.buyer_id]);
-          buyerHold = reconciledHold;
+        if (authoritativeHold >= refundAmount) {
+          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [authoritativeHold, escrow.buyer_id]);
+          buyerHold = authoritativeHold;
         } else {
           throw new Error(`Cannot refund order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is insufficient for refund ($${refundAmount.toFixed(2)}).`);
         }
