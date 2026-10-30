@@ -1691,6 +1691,13 @@ export class FinancialTransactionService {
         throw new Error('User account is frozen. Financial transactions are restricted.');
       }
 
+      // Uniform Lock Sequence: 1. Lock active payouts for freelancer in deterministic order
+      const activePayoutsRes = await client.query(
+        "SELECT * FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE",
+        [params.freelancerId]
+      );
+
+      // 2. Lock freelancer wallet
       const walletRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [params.freelancerId]);
       if (walletRes.rows.length === 0) throw new Error('Freelancer wallet not found');
       const wallet = walletRes.rows[0];
