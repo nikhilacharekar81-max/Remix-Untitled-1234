@@ -393,7 +393,7 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
     }
 
     let rawAmount = Number(req.body?.amount);
-    const isInquiry = (Boolean(req.body?.isInquiry) && (!Number.isFinite(rawAmount) || rawAmount === 0)) || (rawAmount === 0 && /^inquiry:/i.test(title));
+    const isInquiry = Boolean(req.body?.isInquiry === true || req.body?.type === 'inquiry' || req.body?.metadata?.isInquiry === true);
     if (isInquiry) rawAmount = 0;
 
     const resolvedOriginType: 'gig' | 'project' | 'profile' = req.body?.projectId
@@ -670,7 +670,7 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
                  GROUP BY elem
                ) deduped
              )`,
-          [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: 'gig', originId: req.body?.gigId || id, status: 'active', activeOrderId: id, isInquiry })]
+           [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: 'gig', originId: req.body?.gigId || id, status: 'active', activeOrderId: id, isInquiry: false })]
         );
       } else if (req.body?.workspaceId) {
         const wsRes = await client.query('SELECT * FROM workspaces WHERE workspace_id = $1 FOR UPDATE', [req.body.workspaceId]);
@@ -727,53 +727,31 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
                  GROUP BY elem
                ) deduped
              )`,
-          [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: resolvedOriginType, originId: resolvedOriginId, status: 'active', activeOrderId: id, isInquiry })]
+          [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: resolvedOriginType, originId: resolvedOriginId, status: 'active', activeOrderId: id, isInquiry: false })]
         );
       }
 
-      let newOrd: any;
-      if (isInquiry) {
-        newOrd = {
-          id,
-          workspaceId,
-          ...(orderType ? { orderType } : {}),
-          ...(gigOrderId ? { gigOrderId } : {}),
-          ...(projectOrderId ? { projectOrderId } : {}),
-          title,
-          buyerId,
-          sellerId,
-          amount: 0,
-          status: 'in_progress',
-          createdAt: today,
-          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
-          gigId: req.body.gigId,
-          projectId: req.body.projectId,
-          ...(requirements ? { requirements } : {}),
-          selectedExtras: selectedExtrasDetails
-        };
-      } else {
-        newOrd = {
-          id,
-          workspaceId,
-          ...(orderType ? { orderType } : {}),
-          ...(gigOrderId ? { gigOrderId } : {}),
-          ...(projectOrderId ? { projectOrderId } : {}),
-          title,
-          buyerId,
-          sellerId,
-          amount: rawAmount,
-          status: 'payment_pending',
-          createdAt: today,
-          dueDate: serverDerivedDueDate,
-          escrowProtectionStartDate: today,
-          escrowProtectionEndDate: new Date(Date.now() + (siteSettings.getSettings().commission.escrowProtectionDays || DEFAULT_SITE_SETTINGS.commission.escrowProtectionDays) * 86400000).toISOString().split('T')[0],
-          gigId: req.body.gigId,
-          projectId: req.body.projectId,
-          feeBreakdown: await quoteOrderWithLiveSettings(rawAmount).catch(() => calculateOrderFees(rawAmount)),
-          ...(requirements ? { requirements } : {}),
-          selectedExtras: selectedExtrasDetails
-        };
-      }
+      const newOrd: Order = {
+        id,
+        workspaceId,
+        ...(orderType ? { orderType } : {}),
+        ...(gigOrderId ? { gigOrderId } : {}),
+        ...(projectOrderId ? { projectOrderId } : {}),
+        title,
+        buyerId,
+        sellerId,
+        amount: rawAmount,
+        status: 'payment_pending',
+        createdAt: today,
+        dueDate: serverDerivedDueDate,
+        escrowProtectionStartDate: today,
+        escrowProtectionEndDate: new Date(Date.now() + (siteSettings.getSettings().commission.escrowProtectionDays || DEFAULT_SITE_SETTINGS.commission.escrowProtectionDays) * 86400000).toISOString().split('T')[0],
+        gigId: req.body.gigId,
+        projectId: req.body.projectId,
+        feeBreakdown: await quoteOrderWithLiveSettings(rawAmount).catch(() => calculateOrderFees(rawAmount)),
+        ...(requirements ? { requirements } : {}),
+        selectedExtras: selectedExtrasDetails
+      };
 
       const serviceFee = newOrd.serviceFee ?? (newOrd.feeBreakdown as any)?.buyerFee ?? 0;
       const smallOrderFee = newOrd.smallOrderFee ?? (newOrd.feeBreakdown as any)?.smallOrderFee ?? 0;
@@ -2078,7 +2056,20 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
         }
 
         let refundedAmt = 0;
-        if (order.amount === 0 || /^inquiry:/i.test(order.title)) {
+        const orderMeta = typeof (order as any).metadata === 'string'
+          ? (() => { try { return JSON.parse((order as any).metadata); } catch { return {}; } })()
+          : ((order as any).metadata || {});
+        const isCustomOrder = Boolean((order as any).isCustomOrder || orderMeta.isCustomOrder || orderMeta.customOrderFromInquiry);
+        const escRow = await financialRepository.getEscrow(order.id, client);
+        const hasEscrowRecord = Boolean(escRow && (Number(escRow.remaining || 0) > 0 || escRow.status === 'held' || Number(escRow.amount || 0) > 0));
+
+        const isAuthoritativeInquiryOnly = Boolean(
+          ((order as any).isInquiry === true || orderMeta.isInquiry === true) &&
+          !isCustomOrder &&
+          !hasEscrowRecord
+        );
+
+        if (isAuthoritativeInquiryOnly) {
           order.status = 'cancelled';
           await client.query(
             "UPDATE orders SET status = 'cancelled', cancellation_type = 'inquiry_cancelled', cancellation_request = $1, cancellation_history = $2 WHERE id = $3",
