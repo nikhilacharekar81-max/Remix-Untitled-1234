@@ -230,9 +230,9 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
         )}
 
         {/* GIG CANCELLATION ACTIONS */}
-        {((order.orderType === 'gig' || (order as any).gigOrderId) && (order.status as string) !== 'completed' && (order.status as string) !== 'cancelled') && (
+        {((order?.orderType === 'gig' || (order as any)?.gigOrderId) && (order?.status as string) !== 'completed' && (order?.status as string) !== 'cancelled') && (
           <div className="space-y-2 pt-2 border-t border-slate-100">
-            {((order.orderType === 'gig' || (order as any).gigOrderId) && isBuyer && (order.status as string) !== 'completed' && (order.status as string) !== 'cancelled' && isOrderVeryLate(order)) && onOpenVeryLateCancelModal && (
+            {((order?.orderType === 'gig' || (order as any)?.gigOrderId) && isBuyer && (order?.status as string) !== 'completed' && (order?.status as string) !== 'cancelled' && isOrderVeryLate(order)) && onOpenVeryLateCancelModal && (
               <button
                 onClick={onOpenVeryLateCancelModal}
                 className="w-full py-2.5 px-4 bg-rose-600 hover:bg-rose-500 text-white rounded-2xl text-xs font-bold text-left flex items-center justify-between transition shadow-xs cursor-pointer"

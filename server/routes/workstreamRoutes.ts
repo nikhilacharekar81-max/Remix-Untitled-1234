@@ -786,23 +786,59 @@ router.get('/offers', requireAuth, async (req: Request, res: Response) => {
 router.get('/orders/:id/offers', requireAuth, async (req: Request, res: Response) => {
   try {
     const caller = await offerCaller(req);
-    const order = await store.getOrder(req.params.id);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (!canAccessOrderWorkstream(caller, order)) return res.status(403).json({ error: 'Forbidden' });
+    let order = await store.getOrder(req.params.id);
+    let workspace: any = null;
+    let isWorkspaceOnly = false;
+
+    if (!order) {
+      workspace = await workspaceService.getWorkspaceAsync(req.params.id);
+      if (!workspace || !(workspace.metadata as any)?.isInquiry) {
+        return res.status(404).json({ error: 'Order or Inquiry not found' });
+      }
+      isWorkspaceOnly = true;
+    }
+
+    if (isWorkspaceOnly) {
+      if (caller.id !== workspace.buyerId && caller.id !== workspace.sellerId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    } else if (!canAccessOrderWorkstream(caller, order!)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
 
     const orderOnly = req.query.orderOnly === 'true' || req.query.scope === 'order';
-    const orderOffers = (!orderOnly && order.workspaceId)
-      ? await store.listOffersForWorkspace(order.workspaceId, order.id)
-      : await store.listOffersForOrder(order.id);
+    let orderOffers: WorkstreamOffer[] = [];
+    if (isWorkspaceOnly) {
+      orderOffers = await store.listOffersForWorkspace(workspace.workspaceId);
+    } else {
+      orderOffers = (!orderOnly && order!.workspaceId)
+        ? await store.listOffersForWorkspace(order!.workspaceId, order!.id)
+        : await store.listOffersForOrder(order!.id);
+    }
+
     const offers = await Promise.all(orderOffers.map(viewOffer));
-    const esc = await financialRepository.getEscrow(order.id);
+    
+    let esc: any = null;
+    let escrowFunded = false;
+    let escrowRemaining = 0;
+    let totalReleased = 0;
+    let hasPaidInvoice = false;
+
+    if (!isWorkspaceOnly) {
+      esc = await financialRepository.getEscrow(order!.id);
+      escrowFunded = await orderHasEscrow(order!.id);
+      escrowRemaining = await getActiveEscrowRemaining(order!);
+      totalReleased = esc ? esc.releasedGross : (order!.status === 'completed' ? Number(order!.amount || 0) : 0);
+      hasPaidInvoice = await hasPaidInvoiceOrReleasedEscrow(order!);
+    }
+
     res.json({
       offers,
       currencySymbol: siteSettings.getFlattenedSettings().currencySymbol || '$',
-      escrowFunded: await orderHasEscrow(order.id),
-      escrowRemaining: await getActiveEscrowRemaining(order),
-      totalReleased: esc ? esc.releasedGross : (order.status === 'completed' ? Number(order.amount || 0) : 0),
-      hasPaidInvoice: await hasPaidInvoiceOrReleasedEscrow(order)
+      escrowFunded,
+      escrowRemaining,
+      totalReleased,
+      hasPaidInvoice
     });
   } catch (err: any) {
     res.status(500).json(formatApiError(err));
@@ -813,13 +849,35 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
   try {
     const caller = await offerCaller(req);
     if (!caller || (caller.status !== 'active' && caller.status !== 'restricted')) return res.status(403).json({ error: 'Account is not active' });
-    const order = await store.getOrder(req.params.id);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (caller.id !== order.sellerId) return res.status(403).json({ error: 'Only the seller of this workstream can send this.' });
+    
+    let order = await store.getOrder(req.params.id);
+    let workspace: any = null;
+    let isWorkspaceOnly = false;
+
+    if (!order) {
+      workspace = await workspaceService.getWorkspaceAsync(req.params.id);
+      if (!workspace || !(workspace.metadata as any)?.isInquiry) {
+        return res.status(404).json({ error: 'Order or Inquiry not found' });
+      }
+      isWorkspaceOnly = true;
+    }
+
+    if (isWorkspaceOnly) {
+        if (caller.id !== workspace.buyerId && caller.id !== workspace.sellerId) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+    } else if (order) {
+        if (caller.id !== order.sellerId) return res.status(403).json({ error: 'Only the seller of this workstream can send this.' });
+    } else {
+        return res.status(404).json({ error: 'Order not found' });
+    }
+
     const kind = req.body?.kind as WorkstreamOfferKind;
     if (!['proposal', 'invoice', 'deposit'].includes(kind)) return res.status(400).json({ error: 'Invalid type.' });
-    if ((order.status === 'cancelled' || (order.status as string) === 'refunded') && kind === 'invoice') {
-      return res.status(409).json({ error: 'Cannot send a final invoice on a cancelled or refunded order. Send a proposal or deposit to start a follow-on order.' });
+    if (!isWorkspaceOnly) {
+        if ((order!.status === 'cancelled' || (order!.status as string) === 'refunded') && kind === 'invoice') {
+          return res.status(409).json({ error: 'Cannot send a final invoice on a cancelled or refunded order. Send a proposal or deposit to start a follow-on order.' });
+        }
     }
 
     const amount = Math.round(Number(req.body?.amount) * 100) / 100;
@@ -839,11 +897,22 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       if (!Number.isFinite(deliveryDays) || deliveryDays < 1 || deliveryDays > 365) return res.status(400).json({ error: 'Delivery time must be 1-365 days.' });
     }
 
-    const funded = await orderHasEscrow(order.id);
-    const activeEscrow = await getActiveEscrowRemaining(order);
-    const hasPaidFirstInvoice = await hasPaidInvoiceOrReleasedEscrow(order);
+    let funded = false;
+    let activeEscrow = 0;
+    let hasPaidFirstInvoice = false;
+    let existingOffers: WorkstreamOffer[] = [];
 
-    const existingOffers = (await store.listOffersForOrder(order.id)).filter(o => o.orderId === order.id);
+    if (!isWorkspaceOnly) {
+      funded = await orderHasEscrow(order!.id);
+      activeEscrow = await getActiveEscrowRemaining(order!);
+      hasPaidFirstInvoice = await hasPaidInvoiceOrReleasedEscrow(order!);
+      existingOffers = (await store.listOffersForOrder(order!.id)).filter(o => o.orderId === order!.id);
+    } else {
+      if (kind !== 'proposal') {
+        return res.status(400).json({ error: 'Inquiries only support proposal offers.' });
+      }
+      existingOffers = await store.listOffersForWorkspace(workspace.workspaceId);
+    }
 
     if (kind === 'invoice') {
       if (!funded || activeEscrow <= 0) return res.status(400).json({ error: 'Final invoices are for completed work on a funded workstream.' });
@@ -857,14 +926,14 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       if (existingOffers.some(o => o.kind === 'invoice' && o.status === 'pending')) {
         return res.status(409).json({ error: 'A seller must not raise a new proposal when a previous proposal/order has a pending invoice.' });
       }
-      if ((order.orderType === 'gig' || (order.gigId && !order.projectId)) && activeEscrow > 0 && !hasPaidFirstInvoice) {
+      if (!isWorkspaceOnly && (order?.orderType === 'gig' || (order?.gigId && !order?.projectId)) && activeEscrow > 0 && !hasPaidFirstInvoice) {
         return res.status(409).json({ error: 'This Gig is already funded in escrow. Please raise and get your first invoice paid before sending a follow-on proposal.' });
       }
     }
 
     let uploadedFiles: Array<{ id: string; name: string; size: string; url: string; uploadedAt: string; type: string }> = [];
     if (kind === 'invoice' && Array.isArray(req.body?.files) && req.body.files.length > 0) {
-      const validation = await validateStoredWorkstreamFiles(req.body.files, caller, order.id);
+      const validation = await validateStoredWorkstreamFiles(req.body.files, caller, isWorkspaceOnly ? workspace.workspaceId : order!.id);
       if (!validation.ok) {
         return res.status((validation as any).status || 400).json({ error: (validation as any).error });
       }
@@ -878,16 +947,15 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       }));
     }
 
-    const responseDeadline = (order.orderType === 'project' && kind === 'invoice')
+    const responseDeadline = (!isWorkspaceOnly && order!.orderType === 'project' && kind === 'invoice')
       ? new Date(Date.now() + 7 * 86400000).toISOString()
       : undefined;
 
     const offer: WorkstreamOffer = {
       id: 'off_' + randomUUID().slice(0, 12),
       number: generateCollisionSafeOfferNumber(kind),
-      orderId: order.id,
-      originOrderId: order.id,
-      workspaceId: order.workspaceId,
+      orderId: isWorkspaceOnly ? workspace.workspaceId : order!.id,
+      workspaceId: isWorkspaceOnly ? workspace.workspaceId : order!.workspaceId,
       kind,
       title,
       amount,
@@ -900,62 +968,65 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       createdBy: caller.id,
       createdAt: new Date().toISOString(),
       metadata: {
-        originOrderId: order.id,
-        ...(order.workspaceId ? { workspaceId: order.workspaceId } : {})
+        ...(isWorkspaceOnly ? {} : { originOrderId: order!.id }),
+        ...(isWorkspaceOnly ? { workspaceId: workspace.workspaceId } : (order!.workspaceId ? { workspaceId: order!.workspaceId } : {}))
       }
     };
     await saveOfferToDb(offer);
 
-    if (order.orderType === 'project' && kind === 'invoice') {
+    const targetUserId = isWorkspaceOnly ? workspace.buyerId : order!.buyerId;
+    const workspaceId = isWorkspaceOnly ? workspace.workspaceId : order!.workspaceId;
+    
+    if (kind === 'invoice') {
       createNotification({
-        userId: order.buyerId,
+        userId: targetUserId,
         type: 'invoice_received',
         title: 'Invoice received',
-        message: `You received an invoice of $${offer.amount} for "${order.title}". Please review within 7 days.`,
-        link: `/workstream/${order.id}`,
-        metadata: { orderId: order.id, offerId: offer.id }
+        message: `You received an invoice of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}". Please review within 7 days.`,
+        link: `/workstream/${isWorkspaceOnly ? workspaceId : order!.id}`,
+        metadata: { ...(!isWorkspaceOnly ? { orderId: order!.id } : {}), offerId: offer.id }
       });
-    } else if (order.orderType === 'project' && kind === 'proposal') {
+    } else if (kind === 'proposal') {
       createNotification({
-        userId: order.buyerId,
+        userId: targetUserId,
         type: 'proposal_received',
         title: 'Proposal received',
-        message: `You received a proposal of $${offer.amount} for "${order.title}".`,
-        link: `/workstream/${order.id}`,
-        metadata: { orderId: order.id, offerId: offer.id }
+        message: `You received a proposal of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}".`,
+        link: `/workstream/${isWorkspaceOnly ? workspaceId : order!.id}`,
+        metadata: { ...(!isWorkspaceOnly ? { orderId: order!.id } : {}), offerId: offer.id }
       });
     }
 
-    const deliverWorkRequested = Boolean(req.body?.deliverWork);
-    const hasDeliveryEvidence = uploadedFiles.length > 0 || Boolean(rawRef) || (Array.isArray(order.deliverableFiles) && order.deliverableFiles.length > 0) || (Array.isArray(order.deliveryHistory) && order.deliveryHistory.length > 0);
-    const isWorkableStatus = ['funded_in_escrow', 'in_progress', 'accepted'].includes(order.status);
+    const deliverWorkRequested = !isWorkspaceOnly && Boolean(req.body?.deliverWork);
+    const hasDeliveryEvidence = !isWorkspaceOnly && (uploadedFiles.length > 0 || Boolean(rawRef) || (Array.isArray(order!.deliverableFiles) && order!.deliverableFiles.length > 0) || (Array.isArray(order!.deliveryHistory) && order!.deliveryHistory.length > 0));
+    const isWorkableStatus = !isWorkspaceOnly && ['funded_in_escrow', 'in_progress', 'accepted'].includes(order!.status);
 
     if (kind === 'invoice' && deliverWorkRequested && hasDeliveryEvidence && isWorkableStatus) {
-      if (!order.deliverableFiles) order.deliverableFiles = [];
-      if (!order.deliveryHistory) order.deliveryHistory = [];
-      if (uploadedFiles.length > 0) order.deliverableFiles.push(...uploadedFiles);
-      const version = order.deliveryHistory.length + 1;
+      if (!order!.deliverableFiles) order!.deliverableFiles = [];
+      if (!order!.deliveryHistory) order!.deliveryHistory = [];
+      if (uploadedFiles.length > 0) order!.deliverableFiles.push(...uploadedFiles);
+      const version = order!.deliveryHistory.length + 1;
       const sanitizedNotes = note ? escapeHtml(note) : escapeHtml(title);
-      order.deliveryNotes = sanitizedNotes;
-      if (rawRef) order.deliveryReference = rawRef;
-      order.deliveryHistory.push({
+      order!.deliveryNotes = sanitizedNotes;
+      if (rawRef) order!.deliveryReference = rawRef;
+      order!.deliveryHistory.push({
         version,
         notes: sanitizedNotes,
         reference: rawRef || undefined,
         files: uploadedFiles,
         deliveredAt: new Date().toISOString()
       });
-      order.status = 'delivered';
-      if (Array.isArray(order.revisions)) {
-        for (const rev of order.revisions) {
+      order!.status = 'delivered';
+      if (Array.isArray(order!.revisions)) {
+        for (const rev of order!.revisions) {
           if (rev.status === 'requested') rev.status = 'resolved';
         }
       }
-      await store.saveOrder(order);
+      await store.saveOrder(order!);
     }
 
-    await postOfferMessage(order, offer, { id: caller.id, name: caller.name }, `New ${OFFER_LABEL[kind]} ${offer.number}: ${title}`, 'offer_created');
-    res.status(201).json({ offer: await viewOffer(offer), order: enrichOrderWithServiceInfo(order) });
+    await postOfferMessage(isWorkspaceOnly ? (workspace as any) : order!, offer, { id: caller.id, name: caller.name }, `New ${OFFER_LABEL[kind]} ${offer.number}: ${title}`, 'offer_created');
+    res.status(201).json({ offer: await viewOffer(offer), order: order ? enrichOrderWithServiceInfo(order) : null });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -1338,7 +1409,9 @@ async function executeUnifiedOfferAccept(
 router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit(20, 60_000), async (req: Request, res: Response) => {
   const initialOffer = await store.getOfferById(req.params.id);
   if (!initialOffer) return res.status(404).json({ error: 'Not found' });
-  const initialOrder = await store.getOrder(initialOffer.originOrderId || initialOffer.orderId);
+  const targetOrderId = initialOffer.originOrderId || initialOffer.orderId;
+  if (!targetOrderId) return res.status(404).json({ error: 'Order not found' });
+  const initialOrder = await store.getOrder(targetOrderId);
   if (!initialOrder) return res.status(404).json({ error: 'Not found' });
 
   const lockedOrderId = initialOrder.id;
@@ -1346,7 +1419,9 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
   try {
     const offer = await store.getOfferById(req.params.id);
     if (!offer) return res.status(404).json({ error: 'Not found' });
-    const order = await store.getOrder(offer.originOrderId || offer.orderId);
+    const targetId = offer.originOrderId || offer.orderId;
+    if (!targetId) return res.status(404).json({ error: 'Order not found' });
+    const order = await store.getOrder(targetId);
     if (!order) return res.status(404).json({ error: 'Not found' });
 
     const caller = await offerCaller(req);
@@ -1354,7 +1429,8 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
     if (!canAccessOrderWorkstream(caller, order)) return res.status(403).json({ error: 'Forbidden' });
     if (offer.status !== 'pending') {
       if (offer.status === 'accepted' || offer.status === 'paid') {
-        const associatedOrder = await store.getOrder(offer.resultingOrderId || offer.orderId) || order;
+        const targetId = offer.resultingOrderId || offer.orderId;
+        const associatedOrder = (targetId ? await store.getOrder(targetId) : null) || order;
         return res.json({
           success: true,
           offer: await viewOffer(offer),
@@ -1504,7 +1580,8 @@ router.post(
       }
       if (offer.status !== 'pending') {
         if (offer.status === 'accepted' || offer.status === 'paid') {
-          const existingOrder = (offer.resultingOrderId || offer.orderId) ? await store.getOrder(offer.resultingOrderId || offer.orderId) : null;
+          const targetId = offer.resultingOrderId || offer.orderId;
+          const existingOrder = targetId ? await store.getOrder(targetId as string) : null;
           return res.json({
             success: true,
             order: existingOrder ? enrichOrderWithServiceInfo(existingOrder) : null,
@@ -1621,7 +1698,7 @@ router.post(
         if (targetOffer.status !== 'pending') {
           if (targetOffer.status === 'accepted' || targetOffer.status === 'paid') {
             const resultingOrd = (targetOffer.resultingOrderId || targetOffer.orderId)
-              ? await store.getOrder(targetOffer.resultingOrderId || targetOffer.orderId)
+              ? await store.getOrder((targetOffer.resultingOrderId || targetOffer.orderId) as string)
               : freshOrder;
             return res.json({
               success: true,

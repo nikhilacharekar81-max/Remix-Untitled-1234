@@ -450,7 +450,7 @@ export async function viewOffer(o: WorkstreamOffer) {
     const liveQuote = await quoteOrderWithLiveSettings(o.amount).catch(() => calculateOrderFees(o.amount));
     clientTotal = liveQuote?.clientTotal;
     if (o.kind === 'invoice') {
-      const ord = await store.getOrder(o.orderId);
+      const ord = await store.getOrder(o.orderId as string);
       const escrow = ord ? await financialRepository.getEscrow(ord.id) : null;
       const curr = ord ? (o.status === 'pending' ? (escrow?.remaining ?? (ord.status === 'completed' || ord.status === 'cancelled' ? 0 : Number(ord.amount || 0))) : Number(ord.amount || 0)) : 0;
       const addAmt = Math.max(0, Math.round((o.amount - curr) * 100) / 100);

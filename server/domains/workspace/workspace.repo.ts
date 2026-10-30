@@ -237,11 +237,11 @@ export class WorkspaceRepo {
     const verifiedOrderIds = await this.getVerifiedWorkspaceOrderIds(workspaceId, dbRunner);
     const res = await dbRunner.query(
       `SELECT * FROM messages
-       WHERE (order_id IS NOT NULL AND order_id = ANY($1::text[]))
-          OR (order_id IS NULL AND (workspace_id = $2 OR metadata->>'workspaceId' = $2))
+       WHERE workspace_id = $1 OR metadata->>'workspaceId' = $1
        ORDER BY timestamp ASC, id ASC`,
-      [verifiedOrderIds.length > 0 ? verifiedOrderIds : ['__nonexistent__'], workspaceId]
+      [workspaceId]
     );
+    console.log('listMessagesForWorkspace result count:', res.rows.length);
     return res.rows.map((r: any) => ({
       id: r.id,
       orderId: r.order_id || undefined,
@@ -303,7 +303,7 @@ export class WorkspaceRepo {
               resolved_by = EXCLUDED.resolved_by,
               metadata = EXCLUDED.metadata`,
             [
-              o.id, o.number, o.orderId, o.workspaceId || null, o.kind, o.title, o.amount,
+              o.id, o.number, o.orderId || o.workspaceId || null, o.workspaceId || null, o.kind, o.title, o.amount,
               o.deliveryDays ?? null, o.status, o.createdBy, o.createdAt,
               o.resolvedAt || null, o.resolvedBy || null, JSON.stringify(mergedMetadata)
             ]
@@ -358,7 +358,7 @@ export class WorkspaceRepo {
           resolved_by = EXCLUDED.resolved_by,
           metadata = EXCLUDED.metadata`,
         [
-          offer.id, offer.number, offer.orderId, offer.workspaceId || null, offer.kind, offer.title, offer.amount,
+          offer.id, offer.number, offer.orderId || offer.workspaceId || null, offer.workspaceId || null, offer.kind, offer.title, offer.amount,
           offer.deliveryDays ?? null, offer.status, offer.createdBy, offer.createdAt,
           offer.resolvedAt || null, offer.resolvedBy || null, JSON.stringify(mergedMetadata)
         ]
@@ -404,16 +404,17 @@ export class WorkspaceRepo {
         verifiedOrderIds.push(fallbackOrderId);
       }
     }
-    if (verifiedOrderIds.length === 0) {
+    if (verifiedOrderIds.length === 0 && !workspaceId) {
       return [];
     }
     const res = await dbRunner.query(
       `SELECT * FROM workstream_offers
        WHERE order_id = ANY($1::text[])
+          OR workspace_id = $2
           OR (metadata->>'originOrderId') = ANY($1::text[])
           OR (metadata->>'resultingOrderId') = ANY($1::text[])
        ORDER BY created_at DESC, id DESC`,
-      [verifiedOrderIds]
+      [verifiedOrderIds.length > 0 ? verifiedOrderIds : ['__nonexistent__'], workspaceId]
     );
     return res.rows.map(mapOfferRow);
   }

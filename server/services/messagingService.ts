@@ -20,26 +20,26 @@ export function registerMessage(m: Message) {
 
 export async function recordMessage(m: Message, client?: any): Promise<Message> {
   await store.addMessage(m, client);
-  if (m.orderId) {
+  if (m.orderId || m.workspaceId) {
     const dbRunner = client || postgresStore.getPool();
     try {
       if (client) {
         await client.query('SAVEPOINT sp_record_msg_touch');
-        await client.query('UPDATE orders SET updated_at = NOW() WHERE id = $1', [m.orderId]);
+        if (m.orderId) await client.query('UPDATE orders SET updated_at = NOW() WHERE id = $1', [m.orderId]);
         await client.query('RELEASE SAVEPOINT sp_record_msg_touch');
       } else {
-        await dbRunner.query('UPDATE orders SET updated_at = NOW() WHERE id = $1', [m.orderId]);
+        if (m.orderId) await dbRunner.query('UPDATE orders SET updated_at = NOW() WHERE id = $1', [m.orderId]);
       }
     } catch {
       if (client) {
         try { await client.query('ROLLBACK TO SAVEPOINT sp_record_msg_touch'); } catch {}
       }
     }
-    const targetOrderId = m.orderId;
+    const targetId = m.orderId || m.workspaceId;
     if (client || postgresStore.isActiveTransaction()) {
-      postgresStore.onCommit(() => broadcastMessage(m, targetOrderId));
+      postgresStore.onCommit(() => broadcastMessage(m, targetId!));
     } else {
-      broadcastMessage(m, targetOrderId);
+      broadcastMessage(m, targetId!);
     }
   }
   return m;

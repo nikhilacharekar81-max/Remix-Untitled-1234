@@ -536,7 +536,7 @@ export type WorkstreamOfferStatus = 'pending' | 'accepted' | 'paid' | 'declined'
 export interface WorkstreamOffer {
   id: string;
   number: string;
-  orderId: string;
+  orderId?: string;
   originOrderId?: string;
   resultingOrderId?: string;
   workspaceId?: string;

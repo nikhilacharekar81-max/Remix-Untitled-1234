@@ -244,6 +244,8 @@ CREATE TABLE IF NOT EXISTS workstream_offers (
   metadata JSONB
 );
 
+ALTER TABLE workstream_offers ALTER COLUMN order_id DROP NOT NULL;
+
 CREATE TABLE IF NOT EXISTS custom_invoices (
   id VARCHAR(64) PRIMARY KEY,
   invoice_number VARCHAR(64) NOT NULL,
