@@ -486,9 +486,9 @@ export async function postOfferMessage(order: Order, offer: WorkstreamOffer, sen
       action,
       offerId: offer.id,
       offerKind: offer.kind,
-      originOrderId: offer.originOrderId || offer.orderId,
+      ...(offer.originOrderId || offer.orderId ? { originOrderId: offer.originOrderId || offer.orderId } : {}),
       ...(offer.resultingOrderId ? { resultingOrderId: offer.resultingOrderId } : {}),
-      ...(order.workspaceId || offer.workspaceId ? { workspaceId: order.workspaceId || offer.workspaceId } : {})
+      ...((order as any).workspaceId || offer.workspaceId ? { workspaceId: (order as any).workspaceId || offer.workspaceId } : {})
     } as any
   };
   await recordMessage(msg, client);
@@ -501,13 +501,14 @@ export async function postOfferMessage(order: Order, offer: WorkstreamOffer, sen
     if (order.buyerId) recipientIds.push(order.buyerId);
     if (order.sellerId && order.sellerId !== order.buyerId) recipientIds.push(order.sellerId);
   }
+  const targetWorkstreamId = order.id || (order as any).workspaceId || offer.workspaceId;
   for (const userId of recipientIds) {
     await createNotification({
       userId,
       type: 'offer',
       title: 'New Offer Activity',
       message: text,
-      link: `/workstream/${order.id}`,
+      link: `/workstream/${targetWorkstreamId}`,
       dedupKey: `offer_${action}_${msg.id}_${userId}`,
       actorId: sender?.id,
       client

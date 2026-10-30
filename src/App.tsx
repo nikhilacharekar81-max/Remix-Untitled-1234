@@ -1129,7 +1129,11 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
               const targetOrder = newOrder || updatedOrder;
               if (targetOrder && targetOrder.id) {
                 setOrders(prev => {
-                  const withoutTarget = prev.filter(o => o.id !== targetOrder.id);
+                  const withoutTarget = prev.filter(
+                    o =>
+                      o.id !== targetOrder.id &&
+                      !(targetOrder.workspaceId && (o as any).isInquiry && o.id === targetOrder.workspaceId)
+                  );
                   return [targetOrder, ...withoutTarget];
                 });
                 setSelectedOrder(targetOrder);

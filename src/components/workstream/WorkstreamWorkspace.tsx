@@ -228,7 +228,12 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
 
   const isSeller = !!currentUser && currentUser.id === order.sellerId;
   const isBuyer = !!currentUser && currentUser.id === order.buyerId;
-  const currentOrderOffers = offers.filter(o => o.orderId === order.id || o.originOrderId === order.id);
+  const currentOrderOffers = offers.filter(
+    o =>
+      o.orderId === order.id ||
+      o.originOrderId === order.id ||
+      (!o.orderId && !o.originOrderId && Boolean(o.workspaceId) && (o.workspaceId === order.id || o.workspaceId === order.workspaceId))
+  );
   const pendingInvoice = currentOrderOffers.find(o => o.kind === 'invoice' && o.status === 'pending');
   const pendingProposal = currentOrderOffers.find(o => o.kind === 'proposal' && o.status === 'pending');
   const invoiceAlreadyPaid = hasPaidInvoice || Boolean((order as any).hasPaidInvoice) || currentOrderOffers.some(o => o.kind === 'invoice' && o.status === 'paid') || order.status === 'completed';

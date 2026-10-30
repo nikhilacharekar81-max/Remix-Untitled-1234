@@ -1406,11 +1406,337 @@ async function executeUnifiedOfferAccept(
   }
 }
 
+async function executeWorkspaceInquiryOfferAccept(
+  offer: WorkstreamOffer,
+  workspace: any,
+  caller: any,
+  idempotencyKey: string
+): Promise<{ status: number; body: any }> {
+  if (!workspace || !workspace.workspaceId) {
+    return { status: 404, body: { error: 'Inquiry workspace not found.' } };
+  }
+  if (!workspace.buyerId || !workspace.sellerId) {
+    return { status: 400, body: { error: 'Invalid inquiry workspace participants.' } };
+  }
+  if (caller.id !== workspace.buyerId) {
+    return { status: 403, body: { error: 'Only the buyer can accept this offer.' } };
+  }
+  if (offer.createdBy !== workspace.sellerId) {
+    return { status: 403, body: { error: 'Offer was not created by the seller of this workspace.' } };
+  }
+  const offerWsId = offer.workspaceId || offer.metadata?.workspaceId;
+  if (!offerWsId || offerWsId !== workspace.workspaceId) {
+    return { status: 403, body: { error: 'Offer does not belong to this workspace.' } };
+  }
+  if (offer.kind !== 'proposal') {
+    return { status: 400, body: { error: 'Only proposals can create an order from an inquiry.' } };
+  }
+
+  const offerAmount = Math.round(Number(offer.amount) * 100) / 100;
+  if (!Number.isFinite(offerAmount) || offerAmount <= 0) {
+    return { status: 400, body: { error: 'Invalid proposal amount.' } };
+  }
+
+  await ensureWallet(workspace.buyerId);
+  await ensureWallet(workspace.sellerId);
+
+  const newOrderId = 'ord_' + randomUUID().slice(0, 12);
+  const now = new Date().toISOString();
+  const today = now.split('T')[0];
+  const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays || 14;
+  const protectionEnd = new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0];
+
+  const wsMeta = (workspace as any).metadata || {};
+  const originType = workspace.originType || wsMeta.originType || 'gig';
+  const originId = workspace.originId || wsMeta.originId;
+  const isGigOrigin = originType === 'gig';
+  const orderType: 'gig' | 'project' = isGigOrigin ? 'gig' : 'project';
+  const gigOrderId = orderType === 'gig' ? newOrderId : undefined;
+  const projectOrderId = orderType === 'project' ? newOrderId : undefined;
+  const gigId = isGigOrigin && originId && originId !== workspace.workspaceId ? originId : undefined;
+  const projectId = originType === 'project' && originId && originId !== workspace.workspaceId ? originId : undefined;
+
+  const newOrder: Order = {
+    id: newOrderId,
+    workspaceId: workspace.workspaceId,
+    orderType,
+    ...(gigOrderId ? { gigOrderId } : {}),
+    ...(projectOrderId ? { projectOrderId } : {}),
+    ...(gigId ? { gigId } : {}),
+    ...(projectId ? { projectId } : {}),
+    title: offer.title || (workspace as any).title || 'Custom Offer',
+    buyerId: workspace.buyerId,
+    sellerId: workspace.sellerId,
+    amount: offerAmount,
+    status: 'payment_pending',
+    createdAt: today,
+    dueDate: offer.deliveryDays
+      ? new Date(Date.now() + offer.deliveryDays * 86400000).toISOString()
+      : new Date(Date.now() + 7 * 86400000).toISOString(),
+    escrowProtectionStartDate: today,
+    escrowProtectionEndDate: protectionEnd,
+    feeBreakdown: await quoteOrderWithLiveSettings(offerAmount)
+  };
+
+  const enrichedOrder = enrichOrderWithServiceInfo(newOrder);
+
+  try {
+    await postgresStore.executeInTransaction(async (client) => {
+      const offerLockRes = await client.query(
+        'SELECT status, order_id, workspace_id, created_by, metadata FROM workstream_offers WHERE id = $1 FOR UPDATE',
+        [offer.id]
+      );
+      if (offerLockRes.rows.length === 0) {
+        throw new Error('Offer not found.');
+      }
+      const lockedOffer = offerLockRes.rows[0];
+      if (lockedOffer.status !== 'pending') {
+        throw new Error(`This ${OFFER_LABEL[offer.kind]} is already ${lockedOffer.status}.`);
+      }
+      const lockedOfferMeta = typeof lockedOffer.metadata === 'string' ? JSON.parse(lockedOffer.metadata) : (lockedOffer.metadata || {});
+      const lockedWsId = lockedOffer.workspace_id || lockedOfferMeta.workspaceId;
+      if (lockedWsId !== workspace.workspaceId || lockedOffer.created_by !== workspace.sellerId) {
+        throw new Error('Offer does not match this inquiry workspace.');
+      }
+
+      const wsLockRes = await client.query(
+        'SELECT workspace_id, buyer_id, seller_id FROM workspaces WHERE workspace_id = $1 FOR UPDATE',
+        [workspace.workspaceId]
+      );
+      if (wsLockRes.rows.length === 0) {
+        throw new Error('Inquiry workspace not found.');
+      }
+      const lockedWs = wsLockRes.rows[0];
+      if (lockedWs.buyer_id !== workspace.buyerId || lockedWs.seller_id !== workspace.sellerId) {
+        throw new Error('Workspace participant mismatch.');
+      }
+
+      await recordOrder(enrichedOrder, client);
+      await store.saveOrder(enrichedOrder, client);
+
+      await fundOrderEscrowWithEvent({
+        orderId: enrichedOrder.id,
+        orderTitle: enrichedOrder.title,
+        amount: enrichedOrder.amount,
+        buyerId: enrichedOrder.buyerId,
+        sellerId: enrichedOrder.sellerId,
+        actor: `user:${caller.id}`,
+        idempotencyKey
+      }, client);
+
+      const fundedRow = await store.getOrder(enrichedOrder.id, client);
+      if (fundedRow?.feeBreakdown) {
+        enrichedOrder.feeBreakdown = fundedRow.feeBreakdown;
+        (enrichedOrder as any).serviceFee = (fundedRow as any).serviceFee;
+        (enrichedOrder as any).smallOrderFee = (fundedRow as any).smallOrderFee;
+      }
+
+      enrichedOrder.status = 'funded_in_escrow';
+      await store.saveOrder(enrichedOrder, client);
+      await syncUserBalances([enrichedOrder.buyerId, enrichedOrder.sellerId].filter(Boolean), client);
+      await emitSystemEvent(
+        enrichedOrder.id,
+        'order_created',
+        `Order placed: ${enrichedOrder.title}. Payment is held in escrow until the work is approved.`,
+        { workspaceId: workspace.workspaceId },
+        client
+      );
+
+      offer.status = 'accepted';
+      offer.originOrderId = enrichedOrder.id;
+      offer.resultingOrderId = enrichedOrder.id;
+      offer.workspaceId = workspace.workspaceId;
+      offer.orderId = enrichedOrder.id;
+      offer.resolvedAt = now;
+      offer.resolvedBy = caller.id;
+      offer.metadata = {
+        ...(offer.metadata || {}),
+        originOrderId: enrichedOrder.id,
+        resultingOrderId: enrichedOrder.id,
+        workspaceId: workspace.workspaceId
+      };
+      await saveOfferToDb(offer, client);
+
+      if (orderType === 'project') {
+        await createNotification({
+          userId: enrichedOrder.sellerId,
+          type: 'proposal_accepted',
+          title: 'Proposal accepted',
+          message: `Your proposal "${offer.title}" was accepted and escrow has been funded.`,
+          link: `/workstream/${enrichedOrder.id}`,
+          metadata: { orderId: enrichedOrder.id, workspaceId: workspace.workspaceId, offerId: offer.id },
+          client
+        }, client);
+      }
+
+      await postOfferMessage(
+        enrichedOrder,
+        offer,
+        null,
+        `${offer.number || 'Proposal'} was accepted and escrow was funded ($${offerAmount}).`,
+        'offer_accepted',
+        client
+      );
+    });
+  } catch (fundingErr: any) {
+    const latestOffer = await store.getOfferById(offer.id);
+    if (latestOffer && (latestOffer.status === 'accepted' || latestOffer.status === 'paid')) {
+      const createdOrdId = latestOffer.resultingOrderId || latestOffer.orderId;
+      const createdOrd = createdOrdId ? await store.getOrder(createdOrdId) : null;
+      if (createdOrd) {
+        const enrichedCreated = enrichOrderWithServiceInfo(createdOrd);
+        return {
+          status: 200,
+          body: {
+            success: true,
+            offer: await viewOffer(latestOffer),
+            order: enrichedCreated,
+            newOrder: enrichedCreated
+          }
+        };
+      }
+    }
+    return { status: 400, body: { error: fundingErr.message || 'Failed to fund escrow for inquiry proposal.' } };
+  }
+
+  const finalOrder = enrichOrderWithServiceInfo(enrichedOrder);
+  return {
+    status: 200,
+    body: {
+      success: true,
+      offer: await viewOffer(offer),
+      order: finalOrder,
+      newOrder: finalOrder
+    }
+  };
+}
+
 router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit(20, 60_000), async (req: Request, res: Response) => {
   const initialOffer = await store.getOfferById(req.params.id);
   if (!initialOffer) return res.status(404).json({ error: 'Not found' });
   const targetOrderId = initialOffer.originOrderId || initialOffer.orderId;
-  if (!targetOrderId) return res.status(404).json({ error: 'Order not found' });
+
+  if (!targetOrderId) {
+    const initialWorkspaceId = initialOffer.workspaceId || initialOffer.metadata?.workspaceId;
+    if (!initialWorkspaceId) return res.status(404).json({ error: 'Order not found' });
+
+    const lockKey = initialOffer.id;
+    if (!tryAcquireOrderLock(lockKey, res)) return;
+    try {
+      const offer = await store.getOfferById(req.params.id);
+      if (!offer) return res.status(404).json({ error: 'Not found' });
+
+      const caller = await offerCaller(req);
+      if (!caller || (caller.status !== 'active' && caller.status !== 'restricted')) {
+        return res.status(403).json({ error: 'Account is not active' });
+      }
+
+      const wsId = offer.workspaceId || offer.metadata?.workspaceId;
+      if (!wsId) return res.status(404).json({ error: 'Order not found' });
+      const workspace = await workspaceService.getWorkspaceAsync(wsId);
+      if (!workspace) return res.status(404).json({ error: 'Inquiry workspace not found' });
+
+      if (caller.id !== workspace.buyerId && caller.id !== workspace.sellerId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (offer.createdBy !== workspace.sellerId) {
+        return res.status(403).json({ error: 'Offer does not belong to the seller of this workspace.' });
+      }
+      const requestedWsId = typeof req.body?.workspaceId === 'string'
+        ? req.body.workspaceId
+        : (typeof req.body?.workstreamId === 'string' ? req.body.workstreamId : undefined);
+      if (
+        requestedWsId &&
+        requestedWsId !== workspace.workspaceId &&
+        !(Array.isArray(workspace.orderIds) && workspace.orderIds.includes(requestedWsId))
+      ) {
+        return res.status(403).json({ error: 'Offer does not belong to the specified WorkStream.' });
+      }
+
+      if (offer.status !== 'pending') {
+        if (offer.status === 'accepted' || offer.status === 'paid') {
+          const associatedOrderId = offer.resultingOrderId || offer.orderId;
+          const associatedOrder = associatedOrderId ? await store.getOrder(associatedOrderId) : null;
+          const enrichedAssoc = associatedOrder ? enrichOrderWithServiceInfo(associatedOrder) : null;
+          return res.json({
+            success: true,
+            offer: await viewOffer(offer),
+            order: enrichedAssoc,
+            ...(enrichedAssoc ? { newOrder: enrichedAssoc } : {})
+          });
+        }
+        return res.status(409).json({ error: `This ${OFFER_LABEL[offer.kind]} is already ${offer.status}.` });
+      }
+
+      const action = req.params.action;
+      const now = new Date().toISOString();
+      const idempotencyKey = req.body?.idempotencyKey || (req.headers['x-idempotency-key'] as string) || `offer-accept-${offer.id}`;
+      const isProjectInquiry = workspace.originType === 'project' || (workspace.metadata as any)?.originType === 'project';
+
+      if (action === 'cancel') {
+        if (caller.id !== workspace.sellerId) return res.status(403).json({ error: 'Only the seller can cancel this.' });
+        offer.status = 'cancelled';
+        offer.resolvedAt = now;
+        offer.resolvedBy = caller.id;
+        await saveOfferToDb(offer);
+        await postOfferMessage(workspace as any, offer, null, `${offer.number} was cancelled by the seller.`, 'offer_cancelled');
+        if (isProjectInquiry) {
+          createNotification({
+            userId: workspace.buyerId,
+            type: 'proposal_cancelled',
+            title: `${OFFER_LABEL[offer.kind]} cancelled`,
+            message: `The ${offer.kind} for "${(workspace as any).title || offer.title}" was cancelled by the seller.`,
+            link: `/workstream/${workspace.workspaceId}`,
+            metadata: { workspaceId: workspace.workspaceId, offerId: offer.id }
+          });
+        }
+        return res.json({ offer: await viewOffer(offer), order: null });
+      }
+
+      if (caller.id !== workspace.buyerId) {
+        return res.status(403).json({ error: 'Only the buyer can respond to this.' });
+      }
+
+      if (action === 'decline') {
+        const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 1000) : '';
+        if (reason) {
+          offer.rejectionReason = reason;
+          offer.rejectedBy = caller.id;
+          offer.rejectedAt = now;
+        }
+        offer.status = 'declined';
+        offer.resolvedAt = now;
+        offer.resolvedBy = caller.id;
+        await saveOfferToDb(offer);
+        await postOfferMessage(
+          workspace as any,
+          offer,
+          null,
+          `${offer.number} was declined by the buyer.${offer.rejectionReason ? ` Reason: ${offer.rejectionReason}` : ''}`,
+          'offer_declined'
+        );
+        if (isProjectInquiry) {
+          createNotification({
+            userId: workspace.sellerId,
+            type: 'proposal_declined',
+            title: 'Proposal declined',
+            message: `Your proposal "${offer.title}" was declined by the buyer.`,
+            link: `/workstream/${workspace.workspaceId}`,
+            metadata: { workspaceId: workspace.workspaceId, offerId: offer.id }
+          });
+        }
+        return res.json({ offer: await viewOffer(offer), order: null });
+      }
+
+      const acceptResult = await executeWorkspaceInquiryOfferAccept(offer, workspace, caller, idempotencyKey);
+      return res.status(acceptResult.status).json(acceptResult.body);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message });
+    } finally {
+      releaseOrderLock(lockKey);
+    }
+  }
+
   const initialOrder = await store.getOrder(targetOrderId);
   if (!initialOrder) return res.status(404).json({ error: 'Not found' });
 
@@ -1582,9 +1908,11 @@ router.post(
         if (offer.status === 'accepted' || offer.status === 'paid') {
           const targetId = offer.resultingOrderId || offer.orderId;
           const existingOrder = targetId ? await store.getOrder(targetId as string) : null;
+          const enrichedExisting = existingOrder ? enrichOrderWithServiceInfo(existingOrder) : null;
           return res.json({
             success: true,
-            order: existingOrder ? enrichOrderWithServiceInfo(existingOrder) : null,
+            order: enrichedExisting,
+            ...(enrichedExisting ? { newOrder: enrichedExisting } : {}),
             offer: await viewOffer(offer)
           });
         }
@@ -1600,84 +1928,18 @@ router.post(
       }
 
       if (!order) {
+        const wsId = offer.workspaceId || offer.metadata?.workspaceId || msg?.workspace_id;
+        if (!wsId) {
+          return res.status(404).json({ error: 'Inquiry workspace not found' });
+        }
+        const workspace = await workspaceService.getWorkspaceAsync(wsId);
+        if (!workspace) {
+          return res.status(404).json({ error: 'Inquiry workspace not found' });
+        }
         if (!tryAcquireOrderLock(offer.id, res)) return;
         try {
-          const clientId = caller.id;
-          const sellerId = offer.createdBy;
-          const offerAmount = Number(offer.amount);
-          const offerTitle = offer.title || 'Custom Offer';
-
-          if (!sellerId || !Number.isFinite(offerAmount) || offerAmount <= 0) {
-            return res.status(400).json({ error: 'Invalid custom offer details.' });
-          }
-
-          await ensureWallet(clientId);
-          await ensureWallet(sellerId);
-
-          const newOrderId = 'ord_' + randomUUID().slice(0, 12);
-          const today = new Date().toISOString().split('T')[0];
-          const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays || 14;
-
-          const newOrder: Order = {
-            id: newOrderId,
-            workspaceId: offer.workspaceId || newOrderId,
-            title: offerTitle,
-            buyerId: clientId,
-            sellerId: sellerId,
-            amount: offerAmount,
-            status: 'payment_pending',
-            createdAt: today,
-            dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
-            escrowProtectionStartDate: today,
-            escrowProtectionEndDate: new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0],
-            feeBreakdown: await quoteOrderWithLiveSettings(offerAmount)
-          };
-
-          await postgresStore.executeInTransaction(async (client) => {
-            const offerLockRes = await client.query('SELECT status, order_id FROM workstream_offers WHERE id = $1 FOR UPDATE', [offer.id]);
-            if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
-              throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
-            }
-
-            await recordOrder(newOrder, client);
-            await store.saveOrder(newOrder, client);
-
-            await fundOrderEscrowWithEvent({
-              orderId: newOrder.id,
-              orderTitle: newOrder.title,
-              amount: newOrder.amount,
-              buyerId: newOrder.buyerId,
-              sellerId: newOrder.sellerId,
-              actor: `user:${caller.id}`,
-              idempotencyKey
-            }, client);
-
-            const fundedRow = await store.getOrder(newOrder.id, client);
-            if (fundedRow?.feeBreakdown) {
-              newOrder.feeBreakdown = fundedRow.feeBreakdown;
-              (newOrder as any).serviceFee = (fundedRow as any).serviceFee;
-              (newOrder as any).smallOrderFee = (fundedRow as any).smallOrderFee;
-            }
-
-            newOrder.status = 'funded_in_escrow';
-            await store.saveOrder(newOrder, client);
-            await syncUserBalances([newOrder.buyerId, newOrder.sellerId].filter(Boolean), client);
-            await emitSystemEvent(newOrder.id, 'order_created', `Order placed: ${newOrder.title}. Payment is held in escrow until the work is approved.`, {}, client);
-
-            offer.status = 'accepted';
-            offer.originOrderId = offer.originOrderId || newOrder.id;
-            offer.resultingOrderId = newOrder.id;
-            offer.workspaceId = newOrder.workspaceId;
-            offer.orderId = newOrder.id;
-            offer.resolvedAt = new Date().toISOString();
-            offer.resolvedBy = caller.id;
-            await saveOfferToDb(offer, client);
-            await postOfferMessage(newOrder, offer, null, `${offer.number || 'Offer'} was accepted and escrow was funded ($${offer.amount}).`, 'offer_accepted', client);
-          });
-
-          return res.json({ success: true, order: enrichOrderWithServiceInfo(newOrder), offer: await viewOffer(offer) });
-        } catch (err: any) {
-          return res.status(400).json({ error: err.message || 'Failed to fund escrow for custom offer' });
+          const acceptResult = await executeWorkspaceInquiryOfferAccept(offer, workspace, caller, idempotencyKey);
+          return res.status(acceptResult.status).json(acceptResult.body);
         } finally {
           releaseOrderLock(offer.id);
         }

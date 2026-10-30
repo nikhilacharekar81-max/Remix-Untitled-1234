@@ -75,6 +75,12 @@ export function useWorkstreamOffers(orderId: string | undefined, refreshKey?: st
       const res = await fetch(url, { method: 'POST', headers: headers(), body: body ? JSON.stringify(body) : undefined });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return { ok: false, error: data.error || 'Something went wrong.' };
+      if (data.offer) {
+        setOffers(prev => {
+          const exists = prev.some(o => o.id === data.offer.id);
+          return exists ? prev.map(o => (o.id === data.offer.id ? data.offer : o)) : [data.offer, ...prev];
+        });
+      }
       await refresh();
       return { ok: true, ...data };
     } catch {
@@ -84,8 +90,12 @@ export function useWorkstreamOffers(orderId: string | undefined, refreshKey?: st
 
   const createOffer = (input: CreateOfferInput) =>
     request(`/api/orders/${orderId}/offers`, { ...input, deliverWork: input.kind === 'invoice' ? true : input.deliverWork });
-  const respond = (offerId: string, action: 'accept' | 'decline' | 'cancel', reason?: string) =>
-    request(`/api/offers/${offerId}/${action}`, reason ? { reason } : undefined);
+  const respond = (offerId: string, action: 'accept' | 'decline' | 'cancel', reason?: string) => {
+    const payload: Record<string, any> = {};
+    if (reason) payload.reason = reason;
+    if (orderId) payload.workstreamId = orderId;
+    return request(`/api/offers/${offerId}/${action}`, Object.keys(payload).length > 0 ? payload : undefined);
+  };
   const refundEscrow = (reason: string) =>
     request('/api/payments/escrow/refund', { orderId, reason });
 

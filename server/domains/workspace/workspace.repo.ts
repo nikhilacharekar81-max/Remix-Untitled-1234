@@ -237,11 +237,12 @@ export class WorkspaceRepo {
     const verifiedOrderIds = await this.getVerifiedWorkspaceOrderIds(workspaceId, dbRunner);
     const res = await dbRunner.query(
       `SELECT * FROM messages
-       WHERE workspace_id = $1 OR metadata->>'workspaceId' = $1
+       WHERE workspace_id = $1
+          OR metadata->>'workspaceId' = $1
+          OR (order_id IS NOT NULL AND order_id = ANY($2::text[]))
        ORDER BY timestamp ASC, id ASC`,
-      [workspaceId]
+      [workspaceId, verifiedOrderIds.length > 0 ? verifiedOrderIds : ['__nonexistent__']]
     );
-    console.log('listMessagesForWorkspace result count:', res.rows.length);
     return res.rows.map((r: any) => ({
       id: r.id,
       orderId: r.order_id || undefined,

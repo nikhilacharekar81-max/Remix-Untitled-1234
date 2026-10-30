@@ -88,26 +88,30 @@ router.get('/orders', requireAuth, requireActiveStatus, async (req: Request, res
       isAdmin ? [] : [authUserId]
     );
 
-    const inqOrders: Order[] = inqRes.rows.map(ws => {
-      const meta = typeof ws.metadata === 'string' ? JSON.parse(ws.metadata) : (ws.metadata || {});
-      return {
-        id: ws.workspace_id,
-        workspaceId: ws.workspace_id,
-        title: ws.title || 'Inquiry',
-        buyerId: ws.buyer_id,
-        sellerId: ws.seller_id,
-        amount: 0,
-        status: 'in_progress' as const,
-        createdAt: ws.created_at,
-        dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
-        isInquiry: true,
-        gigId: meta.originType === 'gig' ? meta.originId : undefined,
-        projectId: meta.originType === 'project' ? meta.originId : undefined,
-        originType: meta.originType
-      } as any;
-    });
-
     const dbOrders = isAdmin ? await store.listOrders() : await store.listOrdersForUser(authUserId);
+    const wsIdsWithRealOrders = new Set(dbOrders.map(o => o.workspaceId).filter(Boolean));
+
+    const inqOrders: Order[] = inqRes.rows
+      .filter(ws => !wsIdsWithRealOrders.has(ws.workspace_id))
+      .map(ws => {
+        const meta = typeof ws.metadata === 'string' ? JSON.parse(ws.metadata) : (ws.metadata || {});
+        return {
+          id: ws.workspace_id,
+          workspaceId: ws.workspace_id,
+          title: ws.title || 'Inquiry',
+          buyerId: ws.buyer_id,
+          sellerId: ws.seller_id,
+          amount: 0,
+          status: 'in_progress' as const,
+          createdAt: ws.created_at,
+          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
+          isInquiry: true,
+          gigId: meta.originType === 'gig' ? meta.originId : undefined,
+          projectId: meta.originType === 'project' ? meta.originId : undefined,
+          originType: meta.originType
+        } as any;
+      });
+
     const ordersList = [...dbOrders, ...inqOrders];
     const orderIds = ordersList.map(o => o.id);
     const wsIds = Array.from(new Set(ordersList.map(o => o.workspaceId).filter(Boolean))) as string[];
@@ -210,7 +214,10 @@ router.get('/orders/:id', requireAuth, async (req: Request, res: Response) => {
     let order = await store.getOrder(req.params.id);
     if (!order) {
       const ws = await workspaceService.getWorkspaceAsync(req.params.id);
-      if (ws && ((ws as any).metadata?.isInquiry || (ws as any).metadata?.isInquiry === 'true')) {
+      if (ws?.activeOrderId) {
+        order = (await store.getOrder(ws.activeOrderId)) || undefined;
+      }
+      if (!order && ws && ((ws as any).metadata?.isInquiry || (ws as any).metadata?.isInquiry === 'true')) {
         const meta = typeof (ws as any).metadata === 'string' ? JSON.parse((ws as any).metadata) : ((ws as any).metadata || {});
         order = {
           id: ws.workspaceId,
@@ -227,7 +234,7 @@ router.get('/orders/:id', requireAuth, async (req: Request, res: Response) => {
           projectId: meta.originType === 'project' ? meta.originId : undefined,
           originType: meta.originType
         } as any;
-      } else {
+      } else if (!order) {
         return res.status(404).json({ error: 'Order not found' });
       }
     }
