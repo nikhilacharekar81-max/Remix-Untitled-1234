@@ -475,7 +475,8 @@ export async function viewOffer(o: WorkstreamOffer) {
 export async function postOfferMessage(order: Order, offer: WorkstreamOffer, sender: { id: string; name: string } | null, text: string, action: string, client?: any) {
   const msg: Message = {
     id: `msg_${randomUUID()}`,
-    orderId: order.id,
+    orderId: (order as any).id && !(order as any).workspaceId ? (order as any).id : undefined,
+    workspaceId: (order as any).workspaceId || offer.workspaceId,
     senderId: sender?.id || 'system',
     senderName: sender?.name || 'Workstream',
     text,

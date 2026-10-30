@@ -954,7 +954,7 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
     const offer: WorkstreamOffer = {
       id: 'off_' + randomUUID().slice(0, 12),
       number: generateCollisionSafeOfferNumber(kind),
-      orderId: isWorkspaceOnly ? workspace.workspaceId : order!.id,
+      orderId: isWorkspaceOnly ? undefined : order!.id,
       workspaceId: isWorkspaceOnly ? workspace.workspaceId : order!.workspaceId,
       kind,
       title,
