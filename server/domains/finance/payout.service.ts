@@ -50,14 +50,14 @@ export async function executeEscrowReleaseTransaction(params: {
   allowDisputeResolution?: boolean;
 }, externalClient?: any) {
   const run = async (client: any) => {
-    const ordRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [params.orderId]);
+    const ordRes = await client.query('SELECT * FROM orders WHERE id = $1', [params.orderId]);
     if (ordRes.rows.length > 0) {
       const ordStatus = ordRes.rows[0].status;
       if (ordStatus === 'completed' || ordStatus === 'cancelled') {
         throw new Error(`Cannot release escrow: Order is already ${ordStatus}.`);
       }
     }
-    const escRes = await client.query('SELECT * FROM escrows WHERE order_id = $1 FOR UPDATE', [params.orderId]);
+    const escRes = await client.query('SELECT * FROM escrows WHERE order_id = $1', [params.orderId]);
     if (escRes.rows.length === 0) {
       throw new Error(`Escrow record not found in PostgreSQL for order ${params.orderId}`);
     }
@@ -79,14 +79,14 @@ export async function executeEscrowRefundTransaction(params: {
   idempotencyKey?: string;
 }, externalClient?: any) {
   const run = async (client: any) => {
-    const ordRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [params.orderId]);
+    const ordRes = await client.query('SELECT * FROM orders WHERE id = $1', [params.orderId]);
     if (ordRes.rows.length > 0) {
       const ordStatus = ordRes.rows[0].status;
       if (ordStatus === 'completed' || ordStatus === 'cancelled') {
         throw new Error(`Cannot refund escrow: Order is already ${ordStatus}.`);
       }
     }
-    const escRes = await client.query('SELECT * FROM escrows WHERE order_id = $1 FOR UPDATE', [params.orderId]);
+    const escRes = await client.query('SELECT * FROM escrows WHERE order_id = $1', [params.orderId]);
     if (escRes.rows.length === 0) {
       throw new Error(`Escrow record not found in PostgreSQL for order ${params.orderId}`);
     }
@@ -293,7 +293,7 @@ export const approvePayout = async (req: Request, res: Response) => {
   try {
     const payoutId = req.params.id;
     const updatedPayout = await postgresStore.executeInTransaction(async (client) => {
-      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
+      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
       if (pRes.rows.length === 0) throw { status: 404, message: 'Payout not found' };
       const payout = pRes.rows[0];
       if (payout.status === 'approved') {
@@ -349,7 +349,7 @@ export const processPayout = async (req: Request, res: Response) => {
     }
 
     const { journal, freelancerId } = await postgresStore.executeInTransaction(async (client) => {
-      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
+      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
       if (pCheck.rows.length === 0) throw { status: 404, message: 'Payout not found' };
       const preRow = pCheck.rows[0];
       if (preRow.status !== 'pending' && preRow.status !== 'approved') {
@@ -361,7 +361,6 @@ export const processPayout = async (req: Request, res: Response) => {
       if (Number(preRow.amount) !== Number(candidatePayout.amount) || preRow.method !== candidatePayout.method) {
         throw { status: 409, message: 'Payout details changed concurrently during verification.' };
       }
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [preRow.freelancer_id]);
       const settled = await financialTransactionService.settlePayout({
         payoutId,
         actor: adminActor(req),
@@ -390,13 +389,12 @@ export const rejectPayout = async (req: Request, res: Response) => {
     const actor = adminActor(req);
 
     const { freelancerId } = await postgresStore.executeInTransaction(async (client) => {
-      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
+      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
       if (pRes.rows.length === 0) throw { status: 404, message: 'Payout not found' };
       const payoutRow = pRes.rows[0];
       if (payoutRow.status !== 'pending' && payoutRow.status !== 'approved') {
         throw { status: 400, message: `Cannot reject payout in status "${payoutRow.status}"` };
       }
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payoutRow.freelancer_id]);
       await financialTransactionService.cancelPayout({
         payoutId,
         reason,
@@ -424,7 +422,7 @@ export const failPayout = async (req: Request, res: Response) => {
     const actor = adminActor(req);
 
     const txResult = await postgresStore.executeInTransaction(async (client) => {
-      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
+      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
       if (pCheck.rows.length === 0) throw { status: 404, message: 'Payout not found' };
       const currentPayout = pCheck.rows[0];
 
@@ -438,7 +436,6 @@ export const failPayout = async (req: Request, res: Response) => {
         throw { status: 400, message: `Cannot fail payout in status "${currentPayout.status}"` };
       }
 
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [currentPayout.freelancer_id]);
       await financialTransactionService.failPayout({
         payoutId,
         reason,
@@ -470,13 +467,12 @@ export const retryPayout = async (req: Request, res: Response) => {
     const actor = adminActor(req);
 
     const pRow = await postgresStore.executeInTransaction(async (client) => {
-      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
+      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
       if (pCheck.rows.length === 0) throw { status: 404, message: 'Payout not found' };
       const p = pCheck.rows[0];
       if (p.status !== 'failed') {
         throw { status: 400, message: 'Only failed payouts can be retried.' };
       }
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [p.freelancer_id]);
       await financialTransactionService.retryPayout({ payoutId, actor }, client);
       return p;
     });
