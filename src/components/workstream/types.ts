@@ -120,11 +120,29 @@ export const WORKSTREAM_TAB_STATUSES = {
 
 export function isInquiryWorkstream(order?: any, workspace?: any): boolean {
   if (!order && !workspace) return false;
-  if (order?.isInquiry || order?.isCustomOrder || order?.customOrderFromInquiry) return true;
-  if (order?.metadata?.isInquiry || order?.metadata?.isCustomOrder || order?.metadata?.customOrderFromInquiry) return true;
-  if (typeof order?.id === 'string' && order.id.startsWith('ws-')) return true;
-  if (typeof order?.title === 'string' && /^inquiry:/i.test(order.title)) return true;
-  if ((workspace?.metadata as any)?.isInquiry || (workspace as any)?.isInquiry) return true;
+
+  // 1. Authoritative Inquiry or Custom Order flags on the order
+  if (order?.isInquiry === true || order?.isCustomOrder === true || order?.customOrderFromInquiry === true) {
+    return true;
+  }
+  if (
+    order?.metadata?.isInquiry === true ||
+    order?.metadata?.isCustomOrder === true ||
+    order?.metadata?.customOrderFromInquiry === true
+  ) {
+    return true;
+  }
+  if (Boolean(order?.inquiryWorkspaceId) || Boolean(order?.metadata?.inquiryWorkspaceId)) {
+    return true;
+  }
+
+  // 2. Authoritative Inquiry or Custom Order flags on the workspace
+  const targetWs = workspace || order?.workspace;
+  if (targetWs) {
+    if (targetWs?.isInquiry === true || targetWs?.isCustomOrder === true) return true;
+    if (targetWs?.metadata?.isInquiry === true || targetWs?.metadata?.isCustomOrder === true) return true;
+  }
+
   return false;
 }
 

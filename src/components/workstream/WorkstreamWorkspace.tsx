@@ -239,7 +239,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
   const invoiceAlreadyPaid = hasPaidInvoice || Boolean((order as any).hasPaidInvoice) || currentOrderOffers.some(o => o.kind === 'invoice' && o.status === 'paid') || order.status === 'completed';
   const activeEscrow = escrowRemaining > 0 ? escrowRemaining : (escrowFunded ? Number(order.amount || 0) : 0);
   const isCustomOrderWorkstream = isInquiryWorkstream(order);
-  const isInquiryOrder = (!escrowFunded && Number(order.amount || 0) === 0) || /^inquiry:/i.test(order.title || '') || (isCustomOrderWorkstream && !escrowFunded);
+  const isInquiryOrder = isCustomOrderWorkstream && !escrowFunded;
 
   // PeoplePerHour Gig vs Project Proposal rules:
   // - For Paid Gigs: Seller CANNOT send a new proposal initially because the Gig is already pre-funded.

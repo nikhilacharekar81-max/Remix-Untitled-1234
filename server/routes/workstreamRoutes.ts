@@ -1010,7 +1010,7 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
           }
 
           const escRow = await financialRepository.getEscrow(activeOrder.id, client);
-          const txFunded = Boolean(escRow && (Number((escRow as any).funded || (escRow as any).fundedGross || 0) > 0 || Number(escRow.remaining || 0) > 0 || (escRow as any).status === 'funded' || escRow.status === 'released'));
+          const txFunded = Boolean(escRow && (Number((escRow as any).funded || 0) > 0 || Number(escRow.remaining || 0) > 0 || (escRow as any).status === 'funded' || escRow.status === 'released'));
           const txActiveEscrow = escRow ? Number(escRow.remaining || 0) : 0;
 
           const lockedOffersRes = await client.query(
@@ -1019,7 +1019,7 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
           );
           const txExistingOffers = lockedOffersRes.rows.map(mapOfferRow).filter(o => o.orderId === activeOrder.id);
           const txHasPaidFirstInvoice = Boolean(
-            (escRow && (Number((escRow as any).released || escRow.releasedGross || 0) > 0 || escRow.status === 'released')) ||
+            (escRow && (Number((escRow as any).released || 0) > 0 || escRow.status === 'released')) ||
             txExistingOffers.some(o => o.kind === 'invoice' && (o.status === 'paid' || o.status === 'accepted'))
           );
 
