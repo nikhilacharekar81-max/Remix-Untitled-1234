@@ -69,14 +69,16 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!notes.trim() || uploading) return;
+    if (uploading) return;
+    const effectiveTitle = invoiceTitle.trim() || `Invoice for ${order.title}`;
+    const effectiveNotes = notes.trim() || effectiveTitle;
     const parsedAmount = Number(invoiceAmount) > 0 ? Number(invoiceAmount) : defaultEscrow;
 
     onSubmitDelivery({
-      notes: notes.trim(),
+      notes: effectiveNotes,
       reference: externalLink.trim() || undefined,
       files: attachedFiles,
-      invoiceTitle: invoiceTitle.trim() || `Invoice for ${order.title}`,
+      invoiceTitle: effectiveTitle,
       invoiceAmount: parsedAmount
     });
     setNotes('');
@@ -148,10 +150,9 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
 
           <div>
             <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-              Delivery Summary & Release Notes *
+              Delivery Summary & Release Notes (Optional)
             </label>
             <textarea
-              required
               rows={4}
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
@@ -244,7 +245,7 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={!notes.trim() || uploading}
+              disabled={!invoiceTitle.trim() || uploading}
               className="flex-1 py-3 px-4 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold rounded-2xl text-xs shadow-lg transition cursor-pointer flex items-center justify-center gap-1.5"
             >
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />

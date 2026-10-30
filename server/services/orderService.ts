@@ -469,12 +469,32 @@ export function validateOrderReleasePreconditions(order: Order, isAdmin = false,
 
 export function enrichOrderWithServiceInfo(o: Order, isAdmin: boolean = false) {
   const resolvedType = o.orderType || (o as any).type || (o.projectId ? 'project' : 'gig');
+  let reviewWindowDays = o.reviewWindowDays;
+  let reviewWindowExpiresAt = o.reviewWindowExpiresAt;
+  if (
+    resolvedType === 'gig' &&
+    o.status === 'delivered' &&
+    Array.isArray(o.deliveryHistory) &&
+    o.deliveryHistory.length > 0
+  ) {
+    const latestDelivery = o.deliveryHistory[o.deliveryHistory.length - 1];
+    const startMs = getReviewWindowStart(o, latestDelivery);
+    if (!isNaN(startMs)) {
+      const days = typeof reviewWindowDays === 'number' && reviewWindowDays > 0 ? reviewWindowDays : getReviewWindowDays();
+      reviewWindowDays = days;
+      if (!reviewWindowExpiresAt) {
+        reviewWindowExpiresAt = new Date(startMs + days * 24 * 60 * 60 * 1000).toISOString();
+      }
+    }
+  }
   const base = {
     ...o,
     orderType: resolvedType,
     type: resolvedType,
     gigOrderId: o.gigOrderId || (resolvedType === 'gig' ? o.id : undefined),
     projectOrderId: o.projectOrderId || (resolvedType === 'project' ? o.id : undefined),
+    ...(reviewWindowDays !== undefined ? { reviewWindowDays } : {}),
+    ...(reviewWindowExpiresAt ? { reviewWindowExpiresAt } : {}),
     sellerName: (o as any).sellerName || o.sellerUsername || 'Seller',
     sellerAvatar: (o as any).sellerAvatar || '',
     buyerName: (o as any).buyerName || o.buyerUsername || 'Buyer',
@@ -742,6 +762,10 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
           );
           freshOrder.acceptedVersion = latestDelivery.version;
           await store.saveOrder(freshOrder, client);
+          await client.query(
+            "UPDATE workstream_offers SET status = 'paid', resolved_at = $1, resolved_by = 'system' WHERE order_id = $2 AND kind = 'invoice' AND status = 'pending' AND amount <= $3",
+            [new Date(now).toISOString(), freshOrder.id, freshOrder.amount]
+          );
 
           return { freshOrder, relResult };
         });

@@ -37,7 +37,8 @@ import {
   syncUserBalances,
   ensureWallet,
   validateOrderReleasePreconditions,
-  getActiveEscrowRemaining
+  getActiveEscrowRemaining,
+  getReviewWindowDays
 } from '../services/orderService.js';
 import { broadcastMessage } from '../websocket.js';
 import { createNotification } from '../services/notificationService.js';
@@ -978,11 +979,12 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
     const workspaceId = isWorkspaceOnly ? workspace.workspaceId : order!.workspaceId;
     
     if (kind === 'invoice') {
+      const reviewDays = !isWorkspaceOnly && order!.orderType === 'project' ? 7 : getReviewWindowDays();
       createNotification({
         userId: targetUserId,
         type: 'invoice_received',
         title: 'Invoice received',
-        message: `You received an invoice of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}". Please review within 7 days.`,
+        message: `You received an invoice of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}". Please review within ${reviewDays} days.`,
         link: `/workstream/${isWorkspaceOnly ? workspaceId : order!.id}`,
         metadata: { ...(!isWorkspaceOnly ? { orderId: order!.id } : {}), offerId: offer.id }
       });
@@ -997,11 +999,23 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       });
     }
 
-    const deliverWorkRequested = !isWorkspaceOnly && Boolean(req.body?.deliverWork);
+    const isGigOrder =
+      !isWorkspaceOnly &&
+      order!.orderType !== 'project' &&
+      !order!.projectId &&
+      (order!.orderType === 'gig' || Boolean(order!.gigId) || Boolean(order!.gigOrderId));
+    const deliverWorkRequested = !isWorkspaceOnly && (isGigOrder ? req.body?.deliverWork !== false : Boolean(req.body?.deliverWork));
     const hasDeliveryEvidence = !isWorkspaceOnly && (uploadedFiles.length > 0 || Boolean(rawRef) || (Array.isArray(order!.deliverableFiles) && order!.deliverableFiles.length > 0) || (Array.isArray(order!.deliveryHistory) && order!.deliveryHistory.length > 0));
-    const isWorkableStatus = !isWorkspaceOnly && ['funded_in_escrow', 'in_progress', 'accepted'].includes(order!.status);
+    const isWorkableStatus = !isWorkspaceOnly && (
+      isGigOrder
+        ? ['funded_in_escrow', 'in_progress', 'accepted', 'revision', 'draft_review', 'work_in_progress', 'late', 'delivered'].includes(order!.status)
+        : ['funded_in_escrow', 'in_progress', 'accepted'].includes(order!.status)
+    );
+    const shouldTransitionOrderToDelivered = isGigOrder
+      ? (kind === 'invoice' && deliverWorkRequested && isWorkableStatus)
+      : (kind === 'invoice' && deliverWorkRequested && hasDeliveryEvidence && isWorkableStatus);
 
-    if (kind === 'invoice' && deliverWorkRequested && hasDeliveryEvidence && isWorkableStatus) {
+    if (shouldTransitionOrderToDelivered) {
       if (!order!.deliverableFiles) order!.deliverableFiles = [];
       if (!order!.deliveryHistory) order!.deliveryHistory = [];
       if (uploadedFiles.length > 0) order!.deliverableFiles.push(...uploadedFiles);
@@ -1009,14 +1023,20 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       const sanitizedNotes = note ? escapeHtml(note) : escapeHtml(title);
       order!.deliveryNotes = sanitizedNotes;
       if (rawRef) order!.deliveryReference = rawRef;
+      const deliveredAt = new Date().toISOString();
       order!.deliveryHistory.push({
         version,
         notes: sanitizedNotes,
         reference: rawRef || undefined,
         files: uploadedFiles,
-        deliveredAt: new Date().toISOString()
+        deliveredAt
       });
       order!.status = 'delivered';
+      if (isGigOrder) {
+        const gigReviewDays = getReviewWindowDays();
+        order!.reviewWindowDays = gigReviewDays;
+        order!.reviewWindowExpiresAt = new Date(new Date(deliveredAt).getTime() + gigReviewDays * 24 * 60 * 60 * 1000).toISOString();
+      }
       if (Array.isArray(order!.revisions)) {
         for (const rev of order!.revisions) {
           if (rev.status === 'requested') rev.status = 'resolved';
