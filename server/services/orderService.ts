@@ -124,6 +124,19 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
             AND u.id = ANY($1::text[])
             AND u.wallet_balance IS DISTINCT FROM w.available_balance
         `, [distinctIds]);
+        await dbRunner.query(`
+          UPDATE users u
+          SET earned = COALESCE(ec.total_earned, 0)
+          FROM (
+            SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
+            FROM users u2
+            LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
+            WHERE u2.id = ANY($1::text[])
+            GROUP BY u2.id
+          ) ec
+          WHERE u.id = ec.user_id
+            AND u.earned IS DISTINCT FROM ec.total_earned
+        `, [distinctIds]);
       }
     } else {
       await dbRunner.query(`
@@ -132,6 +145,18 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
         FROM wallets w
         WHERE u.id = w.user_id
           AND u.wallet_balance IS DISTINCT FROM w.available_balance
+      `);
+      await dbRunner.query(`
+        UPDATE users u
+        SET earned = COALESCE(ec.total_earned, 0)
+        FROM (
+          SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
+          FROM users u2
+          LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
+          GROUP BY u2.id
+        ) ec
+        WHERE u.id = ec.user_id
+          AND u.earned IS DISTINCT FROM ec.total_earned
       `);
     }
     if (useSavepoint) {

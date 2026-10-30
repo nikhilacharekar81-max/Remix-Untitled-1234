@@ -83,10 +83,10 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
   proposals = [],
   users = [],
   currentUser,
-  platformFee = 10,
-  clientServiceFee = 5,
-  smallOrderFeeThreshold = 50,
-  smallOrderFeeAmount = 2.5,
+  platformFee = 20,
+  clientServiceFee = 1,
+  smallOrderFeeThreshold = 200,
+  smallOrderFeeAmount = 1,
   escrowProtectionDays = 14,
   navigate,
   onOpenWorkstream,
@@ -178,11 +178,25 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
   const [txTypeFilter, setTxTypeFilter] = useState<string>('all');
   const [processingOfferId, setProcessingOfferId] = useState<string | null>(null);
 
-  const ensureValidAuthHeaders = useCallback(async (): Promise<Record<string, string>> => {
+  const ensureValidAuthHeaders = useCallback(async (forceRefresh = false): Promise<Record<string, string>> => {
     let token = getAuthToken();
-    if (!token && currentUser?.id) {
+    if (currentUser?.id) {
+      let tokenUserId: string | null = null;
+      let tokenUserRole: string | null = null;
+      if (token) {
+        try {
+          const [b64] = token.split('.');
+          if (b64 && typeof atob === 'function') {
+            const payload = JSON.parse(atob(b64.replace(/-/g, '+').replace(/_/g, '/')));
+            if (payload?.id) tokenUserId = String(payload.id);
+            if (payload?.role) tokenUserRole = String(payload.role);
+          }
+        } catch {}
+      }
+      const isTokenAdmin = Boolean(tokenUserRole && ['admin', 'super_admin', 'support'].includes(tokenUserRole));
       const isPrivileged = ['admin', 'super_admin', 'support'].includes(currentUser.role || '');
-      if (!isPrivileged) {
+      const needsSession = forceRefresh || !token || (!isTokenAdmin && tokenUserId !== currentUser.id);
+      if (needsSession && !isPrivileged) {
         const session = await requestDemoSession(currentUser.id);
         if (session?.token) {
           token = session.token;
@@ -200,9 +214,14 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
     if (!currentUser?.id) return;
     setIsLoadingData(true);
     try {
-      const headers = await ensureValidAuthHeaders();
-      const [snapRes, txRes, invRes, payRes, methRes, offRes] = await Promise.all([
-        fetch(`/api/payments/user/${currentUser.id}`, { headers }),
+      let headers = await ensureValidAuthHeaders(false);
+      let snapRes = await fetch(`/api/payments/user/${currentUser.id}`, { headers });
+      if (snapRes.status === 401 || snapRes.status === 403) {
+        headers = await ensureValidAuthHeaders(true);
+        snapRes = await fetch(`/api/payments/user/${currentUser.id}`, { headers });
+      }
+
+      const [txRes, invRes, payRes, methRes, offRes] = await Promise.all([
         fetch(`/api/payments/transactions/${currentUser.id}`, { headers }),
         fetch(`/api/payments/invoices/${currentUser.id}`, { headers }),
         fetch('/api/payouts', { headers }),
@@ -244,9 +263,26 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
     }
   }, [currentUser?.id, ensureValidAuthHeaders]);
 
+  const ordersActivitySignature = useMemo(() => {
+    if (!currentUser?.id) return '';
+    const relevantOrders = orders
+      .filter(o => o.buyerId === currentUser.id || o.sellerId === currentUser.id)
+      .map(o => `${o.id}:${o.status}:${o.amount}:${o.completedAt || ''}`)
+      .sort()
+      .join('|');
+    const relevantOffers = offers
+      .map(off => `${off.id}:${off.status}:${off.amount}`)
+      .sort()
+      .join('|');
+    return `${currentUser.id}::${relevantOrders}::${relevantOffers}`;
+  }, [currentUser?.id, orders, offers]);
+
   useEffect(() => {
+    if (snapshot && snapshot.userId && snapshot.userId !== currentUser?.id) {
+      setSnapshot(null);
+    }
     fetchData();
-  }, [fetchData]);
+  }, [fetchData, ordersActivitySignature, currentUser?.id]);
 
   // Merge offers from props and live /api/offers
   const allOffers = useMemo(() => {
@@ -269,10 +305,17 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
     []
   );
 
+  const activeSnapshot = useMemo(() => {
+    if (snapshot && (!snapshot.userId || snapshot.userId === currentUser?.id)) {
+      return snapshot;
+    }
+    return null;
+  }, [snapshot, currentUser?.id]);
+
   // Build authoritative Buyer Orders list for "My Buyer Escrow"
   const buyerOrderRows = useMemo<EnrichedOrderFinancialRow[]>(() => {
-    if (Array.isArray(snapshot?.buyerOrdersSummary) && snapshot.buyerOrdersSummary.length > 0) {
-      return snapshot.buyerOrdersSummary;
+    if (Array.isArray(activeSnapshot?.buyerOrdersSummary) && activeSnapshot.buyerOrdersSummary.length > 0) {
+      return activeSnapshot.buyerOrdersSummary;
     }
     if (!currentUser?.id) return [];
     return orders
@@ -299,12 +342,12 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
           hasPaidInvoice: o.status === 'completed' || paidInvoices.length > 0
         };
       });
-  }, [snapshot?.buyerOrdersSummary, currentUser, orders, allOffers, userMap, activeEscrowStatuses]);
+  }, [activeSnapshot?.buyerOrdersSummary, currentUser, orders, allOffers, userMap, activeEscrowStatuses]);
 
   // Build authoritative Freelancer Orders list for "My Freelancer Escrow"
   const freelancerOrderRows = useMemo<EnrichedOrderFinancialRow[]>(() => {
-    if (Array.isArray(snapshot?.freelancerOrdersSummary) && snapshot.freelancerOrdersSummary.length > 0) {
-      return snapshot.freelancerOrdersSummary;
+    if (Array.isArray(activeSnapshot?.freelancerOrdersSummary) && activeSnapshot.freelancerOrdersSummary.length > 0) {
+      return activeSnapshot.freelancerOrdersSummary;
     }
     if (!currentUser?.id) return [];
     return orders
@@ -331,63 +374,116 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
           hasPaidInvoice: o.status === 'completed' || paidInvoices.length > 0
         };
       });
-  }, [snapshot?.freelancerOrdersSummary, currentUser, orders, allOffers, userMap, activeEscrowStatuses]);
+  }, [activeSnapshot?.freelancerOrdersSummary, currentUser, orders, allOffers, userMap, activeEscrowStatuses]);
+
+  const effectivePlatformFee = useMemo(() => {
+    if (typeof activeSnapshot?.commissionPercent === 'number' && activeSnapshot.commissionPercent > 0) {
+      return activeSnapshot.commissionPercent;
+    }
+    return platformFee > 0 ? platformFee : 20;
+  }, [activeSnapshot?.commissionPercent, platformFee]);
+
+  const effectiveClientServiceFee = useMemo(() => {
+    if (typeof activeSnapshot?.buyerFeePercent === 'number' && activeSnapshot.buyerFeePercent >= 0) {
+      return activeSnapshot.buyerFeePercent;
+    }
+    return clientServiceFee > 0 ? clientServiceFee : 1;
+  }, [activeSnapshot?.buyerFeePercent, clientServiceFee]);
+
+  const effectiveSmallOrderThreshold = useMemo(() => {
+    if (typeof activeSnapshot?.smallOrderFeeThreshold === 'number' && activeSnapshot.smallOrderFeeThreshold >= 0) {
+      return activeSnapshot.smallOrderFeeThreshold;
+    }
+    return smallOrderFeeThreshold > 0 ? smallOrderFeeThreshold : 200;
+  }, [activeSnapshot?.smallOrderFeeThreshold, smallOrderFeeThreshold]);
+
+  const effectiveSmallOrderFee = useMemo(() => {
+    if (typeof activeSnapshot?.smallOrderFeeAmount === 'number' && activeSnapshot.smallOrderFeeAmount >= 0) {
+      return activeSnapshot.smallOrderFeeAmount;
+    }
+    return smallOrderFeeAmount > 0 ? smallOrderFeeAmount : 1;
+  }, [activeSnapshot?.smallOrderFeeAmount, smallOrderFeeAmount]);
 
   // Live balances & metrics (strictly $ USD)
   const availableBalance = useMemo(() => {
-    if (typeof snapshot?.availableBalance === 'number') return snapshot.availableBalance;
+    if (typeof activeSnapshot?.availableBalance === 'number') return activeSnapshot.availableBalance;
     return Number(currentUser?.walletBalance ?? 0);
-  }, [snapshot?.availableBalance, currentUser?.walletBalance]);
+  }, [activeSnapshot?.availableBalance, currentUser?.walletBalance]);
 
   const buyerEscrowTotal = useMemo(() => {
-    if (typeof snapshot?.buyerEscrowAmount === 'number') return snapshot.buyerEscrowAmount;
+    if (typeof activeSnapshot?.buyerEscrowAmount === 'number') return activeSnapshot.buyerEscrowAmount;
     return buyerOrderRows.reduce((sum, r) => sum + Number(r.inEscrow || 0), 0);
-  }, [snapshot?.buyerEscrowAmount, buyerOrderRows]);
+  }, [activeSnapshot?.buyerEscrowAmount, buyerOrderRows]);
 
   const freelancerEscrowTotal = useMemo(() => {
-    if (typeof snapshot?.freelancerEscrowAmount === 'number') return snapshot.freelancerEscrowAmount;
+    if (typeof activeSnapshot?.freelancerEscrowAmount === 'number') return activeSnapshot.freelancerEscrowAmount;
     return freelancerOrderRows.reduce((sum, r) => sum + Number(r.inEscrow || 0), 0);
-  }, [snapshot?.freelancerEscrowAmount, freelancerOrderRows]);
+  }, [activeSnapshot?.freelancerEscrowAmount, freelancerOrderRows]);
 
   const paidThisMonth = useMemo(() => {
-    if (typeof snapshot?.paidThisMonth === 'number') return snapshot.paidThisMonth;
+    if (typeof activeSnapshot?.paidThisMonth === 'number') return activeSnapshot.paidThisMonth;
     const ym = new Date().toISOString().slice(0, 7);
     return buyerOrderRows
-      .filter(o => (o.createdAt || '').startsWith(ym))
+      .filter(o => {
+        const actMonth = String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 7);
+        const crtMonth = String(o.createdAt || '').slice(0, 7);
+        return (actMonth === ym || crtMonth === ym) && o.status !== 'payment_pending' && (o.status as string) !== 'pending';
+      })
       .reduce((sum, o) => sum + Number(o.amount || 0), 0);
-  }, [snapshot?.paidThisMonth, buyerOrderRows]);
+  }, [activeSnapshot?.paidThisMonth, buyerOrderRows]);
 
   const paidToDate = useMemo(() => {
-    if (typeof snapshot?.paidToDate === 'number') return snapshot.paidToDate;
-    return buyerOrderRows.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-  }, [snapshot?.paidToDate, buyerOrderRows]);
+    if (typeof activeSnapshot?.paidToDate === 'number') return activeSnapshot.paidToDate;
+    return buyerOrderRows
+      .filter(o => o.status !== 'payment_pending' && (o.status as string) !== 'pending')
+      .reduce((sum, o) => sum + Number(o.amount || 0), 0);
+  }, [activeSnapshot?.paidToDate, buyerOrderRows]);
+
+  const resolveRowNetEarnings = useCallback(
+    (o: EnrichedOrderFinancialRow) => {
+      if (typeof (o as any).freelancerNetEarned === 'number' && (o as any).freelancerNetEarned > 0) {
+        return (o as any).freelancerNetEarned;
+      }
+      if (typeof (o.feeBreakdown as any)?.freelancerNet === 'number') {
+        return Number((o.feeBreakdown as any).freelancerNet);
+      }
+      const netRate = (100 - effectivePlatformFee) / 100;
+      return Number((Number(o.amount || 0) * netRate).toFixed(2));
+    },
+    [effectivePlatformFee]
+  );
 
   const earnedThisMonth = useMemo(() => {
-    if (typeof snapshot?.earnedThisMonth === 'number') return snapshot.earnedThisMonth;
+    if (typeof activeSnapshot?.earnedThisMonth === 'number') return activeSnapshot.earnedThisMonth;
     const ym = new Date().toISOString().slice(0, 7);
-    const netRate = (100 - platformFee) / 100;
     return freelancerOrderRows
-      .filter(o => o.status === 'completed' && (o.createdAt || '').startsWith(ym))
-      .reduce((sum, o) => sum + Number(o.amount || 0) * netRate, 0);
-  }, [snapshot?.earnedThisMonth, freelancerOrderRows, platformFee]);
+      .filter(o => {
+        if (o.status !== 'completed') return false;
+        const compMonth = String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 7);
+        const crtMonth = String(o.createdAt || '').slice(0, 7);
+        return compMonth === ym || crtMonth === ym;
+      })
+      .reduce((sum, o) => sum + resolveRowNetEarnings(o), 0);
+  }, [activeSnapshot?.earnedThisMonth, freelancerOrderRows, resolveRowNetEarnings]);
 
   const earnedToDate = useMemo(() => {
-    if (typeof snapshot?.earnedToDate === 'number') return snapshot.earnedToDate;
-    if (typeof currentUser?.earned === 'number' && currentUser.earned > 0) return currentUser.earned;
-    const netRate = (100 - platformFee) / 100;
+    if (typeof activeSnapshot?.earnedToDate === 'number') return activeSnapshot.earnedToDate;
     return freelancerOrderRows
       .filter(o => o.status === 'completed')
-      .reduce((sum, o) => sum + Number(o.amount || 0) * netRate, 0);
-  }, [snapshot?.earnedToDate, currentUser?.earned, freelancerOrderRows, platformFee]);
+      .reduce((sum, o) => sum + resolveRowNetEarnings(o), 0);
+  }, [activeSnapshot?.earnedToDate, freelancerOrderRows, resolveRowNetEarnings]);
 
   const earnedPastTwoMonths = useMemo(() => {
-    if (typeof snapshot?.earnedPastTwoMonths === 'number') return snapshot.earnedPastTwoMonths;
-    return earnedThisMonth;
-  }, [snapshot?.earnedPastTwoMonths, earnedThisMonth]);
+    if (typeof activeSnapshot?.earnedPastTwoMonths === 'number') return activeSnapshot.earnedPastTwoMonths;
+    const twoMonthsAgoDate = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+    return freelancerOrderRows
+      .filter(o => o.status === 'completed' && String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 10) >= twoMonthsAgoDate)
+      .reduce((sum, o) => sum + resolveRowNetEarnings(o), 0);
+  }, [activeSnapshot?.earnedPastTwoMonths, freelancerOrderRows, resolveRowNetEarnings]);
 
   const clearingDays = useMemo(() => {
-    return Number(snapshot?.clearingPeriodDays || escrowProtectionDays || 14);
-  }, [snapshot?.clearingPeriodDays, escrowProtectionDays]);
+    return Number(activeSnapshot?.clearingPeriodDays || escrowProtectionDays || 14);
+  }, [activeSnapshot?.clearingPeriodDays, escrowProtectionDays]);
 
   const handleOpenOrderWorkstream = (ord: Order) => {
     if (onOpenWorkstream) {
@@ -1056,12 +1152,12 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
   const calculatorResult = useMemo(() => {
     const raw = parseFloat(calcInputAmount);
     const val = Number.isFinite(raw) && raw > 0 ? raw : 0;
-    const commRate = Math.max(0, Math.min(100, platformFee)) / 100;
+    const commRate = Math.max(0, Math.min(100, effectivePlatformFee)) / 100;
     const gross = calcMode === 'gross_to_net' ? val : (1 - commRate > 0 ? val / (1 - commRate) : val);
     const commission = Number((gross * commRate).toFixed(2));
     const freelancerNet = Number((gross - commission).toFixed(2));
-    const buyerFee = Number((gross * (clientServiceFee / 100)).toFixed(2));
-    const smallFee = gross > 0 && gross < smallOrderFeeThreshold ? smallOrderFeeAmount : 0;
+    const buyerFee = Number((gross * (effectiveClientServiceFee / 100)).toFixed(2));
+    const smallFee = gross > 0 && gross < effectiveSmallOrderThreshold ? effectiveSmallOrderFee : 0;
     const buyerTotal = Number((gross + buyerFee + smallFee).toFixed(2));
     return {
       gross: Number(gross.toFixed(2)),
@@ -1071,7 +1167,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
       smallFee,
       buyerTotal
     };
-  }, [calcInputAmount, calcMode, platformFee, clientServiceFee, smallOrderFeeThreshold, smallOrderFeeAmount]);
+  }, [calcInputAmount, calcMode, effectivePlatformFee, effectiveClientServiceFee, effectiveSmallOrderThreshold, effectiveSmallOrderFee]);
 
   const topTabs: { id: TopPaymentTab; label: string }[] = [
     { id: 'my_money', label: 'My Money' },
@@ -2068,7 +2164,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
               <div className="flex items-center justify-between text-slate-600">
                 <span>Earned to date</span>
                 <span className="font-bold text-emerald-600 font-mono tabular-nums" title={formatUsd(earnedToDate)}>
-                  {formatCompactUsd(earnedToDate)}
+                  {formatUsd(earnedToDate)}
                 </span>
               </div>
             </div>
@@ -2101,7 +2197,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
               <div className="space-y-2 text-xs">
                 <div className="flex items-center justify-between text-slate-600">
                   <span>First $7,000 earned with a Buyer</span>
-                  <span className="font-bold text-slate-900 font-mono tabular-nums">{platformFee}%</span>
+                  <span className="font-bold text-slate-900 font-mono tabular-nums">{effectivePlatformFee}%</span>
                 </div>
                 <div className="flex items-center justify-between text-slate-600">
                   <span>Over $7,000 earned with a Buyer</span>
@@ -2667,7 +2763,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                 <span className="font-bold text-slate-900">{formatUsd(calculatorResult.gross)}</span>
               </div>
               <div className="flex items-center justify-between text-slate-600">
-                <span>Service Fee ({platformFee}%)</span>
+                <span>Service Fee ({effectivePlatformFee}%)</span>
                 <span className="font-semibold text-rose-600">-{formatUsd(calculatorResult.commission)}</span>
               </div>
               <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-sm">

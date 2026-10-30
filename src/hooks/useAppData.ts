@@ -21,11 +21,11 @@ export const useAppData = (initialData?: any) => {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [userEmails, setUserEmails] = useState<string[]>([]);
   
-  const [platformFee, setPlatformFee] = useState<number>(0);
-  const [clientServiceFee, setClientServiceFee] = useState<number>(0);
-  const [smallOrderFeeThreshold, setSmallOrderFeeThreshold] = useState<number>(0);
-  const [smallOrderFeeAmount, setSmallOrderFeeAmount] = useState<number>(0);
-  const [escrowProtectionDays, setEscrowProtectionDays] = useState<number>(0);
+  const [platformFee, setPlatformFee] = useState<number>(20);
+  const [clientServiceFee, setClientServiceFee] = useState<number>(1);
+  const [smallOrderFeeThreshold, setSmallOrderFeeThreshold] = useState<number>(200);
+  const [smallOrderFeeAmount, setSmallOrderFeeAmount] = useState<number>(1);
+  const [escrowProtectionDays, setEscrowProtectionDays] = useState<number>(14);
   
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

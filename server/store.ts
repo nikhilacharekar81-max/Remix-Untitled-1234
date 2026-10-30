@@ -1675,7 +1675,7 @@ export async function hydrateStoreFromPostgres() {
           rating: 4.9,
           reviewsCount: 124,
           hourlyRate: 95,
-          earned: 42500,
+          earned: 0,
           completedJobs: 48,
           bio: '10+ years building distributed systems, high-scale Node.js backends, React SPAs, and PostgreSQL architectures.',
           skills: ['React', 'Node.js', 'TypeScript', 'PostgreSQL', 'Cloud Architecture'],
@@ -1727,7 +1727,7 @@ export async function hydrateStoreFromPostgres() {
           rating: 5.0,
           reviewsCount: 89,
           hourlyRate: 120,
-          earned: 68400,
+          earned: 0,
           completedJobs: 62,
           bio: 'Specializing in production AI agents, RAG pipelines, and high-converting SaaS interfaces.',
           skills: ['AI Agents', 'Python', 'TypeScript', 'UI/UX Design', 'Next.js'],
@@ -1779,7 +1779,7 @@ export async function hydrateStoreFromPostgres() {
           rating: 5.0,
           reviewsCount: 312,
           hourlyRate: 50,
-          earned: 28400,
+          earned: 0,
           completedJobs: 310,
           bio: 'Top Rated SEO Specialist with 8+ years experience in White Hat link building, high DA backlinks, and technical SEO.',
           skills: ['SEO', 'Backlinks', 'Link Building', 'Keyword Research', 'Google Ranking'],
@@ -2197,6 +2197,19 @@ export async function hydrateStoreFromPostgres() {
         }
       }
     }
+
+    await pool.query(`
+      UPDATE users u
+      SET earned = COALESCE(ec.total_earned, 0)
+      FROM (
+        SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
+        FROM users u2
+        LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
+        GROUP BY u2.id
+      ) ec
+      WHERE u.id = ec.user_id
+        AND u.earned IS DISTINCT FROM ec.total_earned
+    `);
 
     console.log('[PostgresStore] Zero split-brain Cloud Run architecture initialized. PostgreSQL is the 100% source of truth.');
   } catch (err: any) {
