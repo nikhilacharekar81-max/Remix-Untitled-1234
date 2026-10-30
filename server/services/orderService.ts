@@ -685,7 +685,11 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
     }
 
     for (const order of targetOrders) {
-      const days = order.orderType === 'project' ? 7 : getReviewWindowDays();
+      const isProject = order.orderType === 'project';
+      const persistedDays = !isProject && typeof order.reviewWindowDays === 'number' && order.reviewWindowDays > 0
+        ? order.reviewWindowDays
+        : null;
+      const days = isProject ? 7 : (persistedDays ?? getReviewWindowDays());
       const windowMs = days * 24 * 60 * 60 * 1000;
 
       if (!Array.isArray(order.deliveryHistory) || order.deliveryHistory.length === 0) continue;
@@ -693,8 +697,18 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
       if (!latestDelivery || !latestDelivery.deliveredAt) continue;
 
       const deliveredAt = getReviewWindowStart(order, latestDelivery);
-      if (isNaN(deliveredAt)) continue;
-      if (now - deliveredAt < windowMs) continue;
+      const persistedExpiryMs = !isProject && order.reviewWindowExpiresAt ? Date.parse(order.reviewWindowExpiresAt) : NaN;
+      let reviewDeadlineMs: number;
+      if (!isNaN(persistedExpiryMs)) {
+        const restartedAtMs = order.reviewWindowRestartedAt ? Date.parse(order.reviewWindowRestartedAt) : NaN;
+        reviewDeadlineMs = (!isNaN(restartedAtMs) && restartedAtMs + windowMs > persistedExpiryMs)
+          ? restartedAtMs + windowMs
+          : persistedExpiryMs;
+      } else {
+        if (isNaN(deliveredAt)) continue;
+        reviewDeadlineMs = deliveredAt + windowMs;
+      }
+      if (now < reviewDeadlineMs) continue;
 
       if (Array.isArray(order.revisions)) {
         const hasActiveRequestedRevision = order.revisions.some(rev => rev.status === 'requested');
@@ -750,41 +764,89 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
           const freshOrder = (store as any).mapOrderRow ? (store as any).mapOrderRow(freshRow) : await store.getOrder(order.id, client);
           if (!freshOrder || freshOrder.status !== 'delivered') return null;
 
-          freshOrder.acceptedVersion = latestDelivery.version;
+          if (!Array.isArray(freshOrder.deliveryHistory) || freshOrder.deliveryHistory.length === 0) return null;
+          const freshLatestDelivery = freshOrder.deliveryHistory[freshOrder.deliveryHistory.length - 1];
+          if (!freshLatestDelivery || !freshLatestDelivery.deliveredAt || freshLatestDelivery.version !== latestDelivery.version) return null;
+
+          const freshIsProject = freshOrder.orderType === 'project';
+          const freshPersistedDays = !freshIsProject && typeof freshOrder.reviewWindowDays === 'number' && freshOrder.reviewWindowDays > 0
+            ? freshOrder.reviewWindowDays
+            : null;
+          const freshDays = freshIsProject ? 7 : (freshPersistedDays ?? days);
+          const freshWindowMs = freshDays * 24 * 60 * 60 * 1000;
+          const freshDeliveredAt = getReviewWindowStart(freshOrder, freshLatestDelivery);
+          const freshPersistedExpiryMs = !freshIsProject && freshOrder.reviewWindowExpiresAt ? Date.parse(freshOrder.reviewWindowExpiresAt) : NaN;
+          let freshReviewDeadlineMs: number;
+          if (!isNaN(freshPersistedExpiryMs)) {
+            const freshRestartedAtMs = freshOrder.reviewWindowRestartedAt ? Date.parse(freshOrder.reviewWindowRestartedAt) : NaN;
+            freshReviewDeadlineMs = (!isNaN(freshRestartedAtMs) && freshRestartedAtMs + freshWindowMs > freshPersistedExpiryMs)
+              ? freshRestartedAtMs + freshWindowMs
+              : freshPersistedExpiryMs;
+          } else {
+            if (isNaN(freshDeliveredAt)) return null;
+            freshReviewDeadlineMs = freshDeliveredAt + freshWindowMs;
+          }
+          if (now < freshReviewDeadlineMs) return null;
+
+          freshOrder.acceptedVersion = freshLatestDelivery.version;
           const relResult = await releaseOrderFunds(
             freshOrder, 
             'System Auto-Accept', 
-            `Auto-accept after buyer review window (${days} days) elapsed`, 
+            `Auto-accept after buyer review window (${freshDays} days) elapsed`, 
             false, 
             requestKey, 
             false, 
             client
           );
-          freshOrder.acceptedVersion = latestDelivery.version;
+          freshOrder.acceptedVersion = freshLatestDelivery.version;
           await store.saveOrder(freshOrder, client);
-          await client.query(
-            "UPDATE workstream_offers SET status = 'paid', resolved_at = $1, resolved_by = 'system' WHERE order_id = $2 AND kind = 'invoice' AND status = 'pending' AND amount <= $3",
-            [new Date(now).toISOString(), freshOrder.id, freshOrder.amount]
-          );
 
-          return { freshOrder, relResult };
+          const resolvedAtIso = new Date(now).toISOString();
+          const associatedOfferId = typeof (freshLatestDelivery as any).offerId === 'string' && (freshLatestDelivery as any).offerId
+            ? (freshLatestDelivery as any).offerId
+            : null;
+          if (associatedOfferId) {
+            await client.query(
+              "UPDATE workstream_offers SET status = 'paid', resolved_at = $1, resolved_by = 'system' WHERE id = $2 AND order_id = $3 AND kind = 'invoice' AND status = 'pending' AND amount <= $4",
+              [resolvedAtIso, associatedOfferId, freshOrder.id, freshOrder.amount]
+            );
+          } else {
+            const targetInvoiceRes = await client.query(
+              `SELECT id FROM workstream_offers
+               WHERE order_id = $1 AND kind = 'invoice' AND status = 'pending' AND amount <= $2
+               ORDER BY
+                 CASE WHEN (metadata->>'deliveryVersion') = $3 THEN 0 ELSE 1 END,
+                 created_at DESC
+               LIMIT 1
+               FOR UPDATE`,
+              [freshOrder.id, freshOrder.amount, String(freshLatestDelivery.version)]
+            );
+            if (targetInvoiceRes.rows.length > 0) {
+              await client.query(
+                "UPDATE workstream_offers SET status = 'paid', resolved_at = $1, resolved_by = 'system' WHERE id = $2 AND order_id = $3 AND kind = 'invoice' AND status = 'pending'",
+                [resolvedAtIso, targetInvoiceRes.rows[0].id, freshOrder.id]
+              );
+            }
+          }
+
+          return { freshOrder, relResult, freshDays };
         });
 
         if (!autoResult) continue;
-        const { freshOrder, relResult } = autoResult;
+        const { freshOrder, relResult, freshDays } = autoResult;
 
         const sysMsg: Message = {
           id: `msg_${randomUUID()}`,
           orderId: freshOrder.id,
           senderId: 'system',
           senderName: 'WorkPerHour System',
-          text: `🎉 Deliverables automatically accepted: Buyer review window (${days} days) closed without revisions or dispute. Escrow funds released to seller.`,
+          text: `🎉 Deliverables automatically accepted: Buyer review window (${freshDays} days) closed without revisions or dispute. Escrow funds released to seller.`,
           timestamp: new Date(now).toISOString(),
           type: 'system',
           metadata: {
             action: 'order_auto_accepted',
             acceptedVersion: latestDelivery.version,
-            reviewWindowDays: days
+            reviewWindowDays: freshDays
           }
         };
         await recordMessage(sysMsg);
@@ -795,7 +857,7 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
           role: 'system',
           action: 'ORDER_AUTO_ACCEPTED',
           target: `Order #${freshOrder.id}`,
-          details: `Auto-accepted deliverables (version ${latestDelivery.version}) after ${days}-day buyer review window expired`,
+          details: `Auto-accepted deliverables (version ${latestDelivery.version}) after ${freshDays}-day buyer review window expired`,
           timestamp: new Date(now).toISOString()
         };
         await registerAuditLog(autoLog);

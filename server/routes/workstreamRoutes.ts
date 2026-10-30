@@ -973,13 +973,159 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
         ...(isWorkspaceOnly ? { workspaceId: workspace.workspaceId } : (order!.workspaceId ? { workspaceId: order!.workspaceId } : {}))
       }
     };
-    await saveOfferToDb(offer);
+
+    if (isWorkspaceOnly) {
+      await saveOfferToDb(offer);
+    } else {
+      const lockedOrderId = order!.id;
+      if (!tryAcquireOrderLock(lockedOrderId, res)) return;
+      try {
+        await postgresStore.executeInTransaction(async (client) => {
+          const lockedOrderRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [lockedOrderId]);
+          if (lockedOrderRes.rows.length === 0) {
+            const err: any = new Error('Order not found');
+            err.status = 404;
+            throw err;
+          }
+          const lockedOrder = (store as any).mapOrderRow
+            ? (store as any).mapOrderRow(lockedOrderRes.rows[0])
+            : await store.getOrder(lockedOrderId, client);
+          if (!lockedOrder) {
+            const err: any = new Error('Order not found');
+            err.status = 404;
+            throw err;
+          }
+          order = lockedOrder;
+
+          if (caller.id !== order.sellerId) {
+            const err: any = new Error('Only the seller of this workstream can send this.');
+            err.status = 403;
+            throw err;
+          }
+          if ((order.status === 'cancelled' || (order.status as string) === 'refunded') && kind === 'invoice') {
+            const err: any = new Error('Cannot send a final invoice on a cancelled or refunded order. Send a proposal or deposit to start a follow-on order.');
+            err.status = 409;
+            throw err;
+          }
+
+          const escRow = await financialRepository.getEscrow(order.id, client);
+          const txFunded = Boolean(escRow && (Number(escRow.funded || 0) > 0 || Number(escRow.remaining || 0) > 0 || escRow.status === 'funded' || escRow.status === 'released'));
+          const txActiveEscrow = escRow ? Number(escRow.remaining || 0) : 0;
+
+          const lockedOffersRes = await client.query(
+            'SELECT * FROM workstream_offers WHERE order_id = $1 FOR UPDATE',
+            [order.id]
+          );
+          const txExistingOffers = lockedOffersRes.rows.map(mapOfferRow).filter(o => o.orderId === order!.id);
+          const txHasPaidFirstInvoice = Boolean(
+            (escRow && (Number(escRow.released || 0) > 0 || escRow.status === 'released')) ||
+            txExistingOffers.some(o => o.kind === 'invoice' && (o.status === 'paid' || o.status === 'accepted'))
+          );
+
+          if (kind === 'invoice') {
+            if (!txFunded || txActiveEscrow <= 0) {
+              const err: any = new Error('Final invoices are for completed work on a funded workstream.');
+              err.status = 400;
+              throw err;
+            }
+            if (txActiveEscrow > 0 && amount < txActiveEscrow) {
+              const err: any = new Error(`Final invoice amount cannot be less than the funded escrow price ($${txActiveEscrow}).`);
+              err.status = 400;
+              throw err;
+            }
+            if (txExistingOffers.some(o => o.kind === 'invoice' && o.status === 'pending')) {
+              const err: any = new Error('A final invoice is already pending for this workstream.');
+              err.status = 409;
+              throw err;
+            }
+          } else if (kind === 'proposal' || kind === 'deposit') {
+            if (txExistingOffers.some(o => o.kind === 'invoice' && o.status === 'pending')) {
+              const err: any = new Error('A seller must not raise a new proposal when a previous proposal/order has a pending invoice.');
+              err.status = 409;
+              throw err;
+            }
+            if ((order.orderType === 'gig' || (order.gigId && !order.projectId)) && txActiveEscrow > 0 && !txHasPaidFirstInvoice) {
+              const err: any = new Error('This Gig is already funded in escrow. Please raise and get your first invoice paid before sending a follow-on proposal.');
+              err.status = 409;
+              throw err;
+            }
+          }
+
+          const isGigOrder =
+            order.orderType !== 'project' &&
+            !order.projectId &&
+            (order.orderType === 'gig' || Boolean(order.gigId) || Boolean(order.gigOrderId));
+          const deliverWorkRequested = isGigOrder ? req.body?.deliverWork !== false : Boolean(req.body?.deliverWork);
+          const hasDeliveryEvidence =
+            uploadedFiles.length > 0 ||
+            Boolean(rawRef) ||
+            (Array.isArray(order.deliverableFiles) && order.deliverableFiles.length > 0) ||
+            (Array.isArray(order.deliveryHistory) && order.deliveryHistory.length > 0);
+          const isWorkableStatus = isGigOrder
+            ? ['funded_in_escrow', 'in_progress', 'accepted', 'revision', 'draft_review', 'work_in_progress', 'late', 'delivered'].includes(order.status)
+            : ['funded_in_escrow', 'in_progress', 'accepted'].includes(order.status);
+
+          if (isGigOrder && kind === 'invoice' && deliverWorkRequested && !isWorkableStatus) {
+            const err: any = new Error(`Cannot submit a final invoice for an order in "${order.status}" status.`);
+            err.status = 409;
+            throw err;
+          }
+
+          const shouldTransitionOrderToDelivered = isGigOrder
+            ? (kind === 'invoice' && deliverWorkRequested && isWorkableStatus)
+            : (kind === 'invoice' && deliverWorkRequested && hasDeliveryEvidence && isWorkableStatus);
+
+          if (shouldTransitionOrderToDelivered) {
+            if (!order.deliverableFiles) order.deliverableFiles = [];
+            if (!order.deliveryHistory) order.deliveryHistory = [];
+            if (uploadedFiles.length > 0) order.deliverableFiles.push(...uploadedFiles);
+            const version = order.deliveryHistory.length + 1;
+            const sanitizedNotes = note ? escapeHtml(note) : escapeHtml(title);
+            order.deliveryNotes = sanitizedNotes;
+            if (rawRef) order.deliveryReference = rawRef;
+            const deliveredAt = new Date().toISOString();
+            const deliveryEntry: any = {
+              version,
+              notes: sanitizedNotes,
+              reference: rawRef || undefined,
+              files: uploadedFiles,
+              deliveredAt,
+              offerId: offer.id
+            };
+            order.deliveryHistory.push(deliveryEntry);
+            offer.metadata = {
+              ...(offer.metadata || {}),
+              deliveryVersion: version
+            };
+            order.status = 'delivered';
+            if (isGigOrder) {
+              const gigReviewDays = getReviewWindowDays();
+              order.reviewWindowDays = gigReviewDays;
+              order.reviewWindowExpiresAt = new Date(new Date(deliveredAt).getTime() + gigReviewDays * 24 * 60 * 60 * 1000).toISOString();
+            }
+            if (Array.isArray(order.revisions)) {
+              for (const rev of order.revisions) {
+                if (rev.status === 'requested') rev.status = 'resolved';
+              }
+            }
+            await saveOfferToDb(offer, client);
+            await store.saveOrder(order, client);
+          } else {
+            await saveOfferToDb(offer, client);
+          }
+        });
+      } finally {
+        releaseOrderLock(lockedOrderId);
+      }
+    }
 
     const targetUserId = isWorkspaceOnly ? workspace.buyerId : order!.buyerId;
     const workspaceId = isWorkspaceOnly ? workspace.workspaceId : order!.workspaceId;
-    
+
     if (kind === 'invoice') {
-      const reviewDays = !isWorkspaceOnly && order!.orderType === 'project' ? 7 : getReviewWindowDays();
+      const reviewDays = !isWorkspaceOnly && order!.orderType === 'project'
+        ? 7
+        : (typeof order?.reviewWindowDays === 'number' && order.reviewWindowDays > 0 ? order.reviewWindowDays : getReviewWindowDays());
       createNotification({
         userId: targetUserId,
         type: 'invoice_received',
@@ -999,56 +1145,11 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       });
     }
 
-    const isGigOrder =
-      !isWorkspaceOnly &&
-      order!.orderType !== 'project' &&
-      !order!.projectId &&
-      (order!.orderType === 'gig' || Boolean(order!.gigId) || Boolean(order!.gigOrderId));
-    const deliverWorkRequested = !isWorkspaceOnly && (isGigOrder ? req.body?.deliverWork !== false : Boolean(req.body?.deliverWork));
-    const hasDeliveryEvidence = !isWorkspaceOnly && (uploadedFiles.length > 0 || Boolean(rawRef) || (Array.isArray(order!.deliverableFiles) && order!.deliverableFiles.length > 0) || (Array.isArray(order!.deliveryHistory) && order!.deliveryHistory.length > 0));
-    const isWorkableStatus = !isWorkspaceOnly && (
-      isGigOrder
-        ? ['funded_in_escrow', 'in_progress', 'accepted', 'revision', 'draft_review', 'work_in_progress', 'late', 'delivered'].includes(order!.status)
-        : ['funded_in_escrow', 'in_progress', 'accepted'].includes(order!.status)
-    );
-    const shouldTransitionOrderToDelivered = isGigOrder
-      ? (kind === 'invoice' && deliverWorkRequested && isWorkableStatus)
-      : (kind === 'invoice' && deliverWorkRequested && hasDeliveryEvidence && isWorkableStatus);
-
-    if (shouldTransitionOrderToDelivered) {
-      if (!order!.deliverableFiles) order!.deliverableFiles = [];
-      if (!order!.deliveryHistory) order!.deliveryHistory = [];
-      if (uploadedFiles.length > 0) order!.deliverableFiles.push(...uploadedFiles);
-      const version = order!.deliveryHistory.length + 1;
-      const sanitizedNotes = note ? escapeHtml(note) : escapeHtml(title);
-      order!.deliveryNotes = sanitizedNotes;
-      if (rawRef) order!.deliveryReference = rawRef;
-      const deliveredAt = new Date().toISOString();
-      order!.deliveryHistory.push({
-        version,
-        notes: sanitizedNotes,
-        reference: rawRef || undefined,
-        files: uploadedFiles,
-        deliveredAt
-      });
-      order!.status = 'delivered';
-      if (isGigOrder) {
-        const gigReviewDays = getReviewWindowDays();
-        order!.reviewWindowDays = gigReviewDays;
-        order!.reviewWindowExpiresAt = new Date(new Date(deliveredAt).getTime() + gigReviewDays * 24 * 60 * 60 * 1000).toISOString();
-      }
-      if (Array.isArray(order!.revisions)) {
-        for (const rev of order!.revisions) {
-          if (rev.status === 'requested') rev.status = 'resolved';
-        }
-      }
-      await store.saveOrder(order!);
-    }
-
     await postOfferMessage(isWorkspaceOnly ? (workspace as any) : order!, offer, { id: caller.id, name: caller.name }, `New ${OFFER_LABEL[kind]} ${offer.number}: ${title}`, 'offer_created');
     res.status(201).json({ offer: await viewOffer(offer), order: order ? enrichOrderWithServiceInfo(order) : null });
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    const status = err?.status || err?.statusCode || 400;
+    res.status(status).json({ error: err.message });
   }
 });
 
