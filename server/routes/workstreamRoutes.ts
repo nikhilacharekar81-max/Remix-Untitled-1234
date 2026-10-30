@@ -1056,31 +1056,35 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
             activeOrder.orderType !== 'project' &&
             !activeOrder.projectId &&
             (activeOrder.orderType === 'gig' || Boolean(activeOrder.gigId) || Boolean(activeOrder.gigOrderId));
-          const deliverWorkRequested = isGigOrder ? req.body?.deliverWork !== false : Boolean(req.body?.deliverWork);
-          const hasDeliveryEvidence =
-            uploadedFiles.length > 0 ||
-            Boolean(rawRef) ||
-            (Array.isArray(activeOrder.deliverableFiles) && activeOrder.deliverableFiles.length > 0) ||
-            (Array.isArray(activeOrder.deliveryHistory) && activeOrder.deliveryHistory.length > 0);
-          const isWorkableStatus = isGigOrder
-            ? ['funded_in_escrow', 'in_progress', 'accepted', 'revision', 'draft_review', 'work_in_progress', 'late', 'delivered'].includes(activeOrder.status)
-            : ['funded_in_escrow', 'in_progress', 'accepted'].includes(activeOrder.status);
+          const deliverWorkRequested = req.body?.deliverWork !== false;
+          const isWorkableStatus = [
+            'funded_in_escrow',
+            'in_progress',
+            'accepted',
+            'revision',
+            'draft_review',
+            'work_in_progress',
+            'late',
+            'delivered'
+          ].includes(activeOrder.status);
 
-          if (isGigOrder && kind === 'invoice' && deliverWorkRequested && !isWorkableStatus) {
+          if (kind === 'invoice' && !isWorkableStatus) {
             const err: any = new Error(`Cannot submit a final invoice for an order in "${activeOrder.status}" status.`);
             err.status = 409;
             throw err;
           }
 
-          const shouldTransitionOrderToDelivered = isGigOrder
-            ? (kind === 'invoice' && deliverWorkRequested && isWorkableStatus)
-            : (kind === 'invoice' && deliverWorkRequested && hasDeliveryEvidence && isWorkableStatus);
+          const shouldTransitionOrderToDelivered = kind === 'invoice' && deliverWorkRequested && isWorkableStatus;
 
           if (shouldTransitionOrderToDelivered) {
-            if (!activeOrder.deliverableFiles) activeOrder.deliverableFiles = [];
-            if (!activeOrder.deliveryHistory) activeOrder.deliveryHistory = [];
+            if (!Array.isArray(activeOrder.deliverableFiles)) activeOrder.deliverableFiles = [];
+            if (!Array.isArray(activeOrder.deliveryHistory)) activeOrder.deliveryHistory = [];
             if (uploadedFiles.length > 0) activeOrder.deliverableFiles.push(...uploadedFiles);
-            const version = activeOrder.deliveryHistory.length + 1;
+            const maxExistingVersion = activeOrder.deliveryHistory.reduce(
+              (max: number, entry: any) => Math.max(max, Number(entry?.version) || 0),
+              0
+            );
+            const version = Math.max(activeOrder.deliveryHistory.length, maxExistingVersion) + 1;
             const sanitizedNotes = note ? escapeHtml(note) : escapeHtml(title);
             activeOrder.deliveryNotes = sanitizedNotes;
             if (rawRef) activeOrder.deliveryReference = rawRef;
@@ -1091,7 +1095,8 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
               reference: rawRef || undefined,
               files: uploadedFiles,
               deliveredAt,
-              offerId: offer.id
+              offerId: offer.id,
+              ...(responseDeadline ? { responseDeadline } : {})
             };
             activeOrder.deliveryHistory.push(deliveryEntry);
             offer.metadata = {
@@ -1103,6 +1108,8 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
               const gigReviewDays = getReviewWindowDays();
               activeOrder.reviewWindowDays = gigReviewDays;
               activeOrder.reviewWindowExpiresAt = new Date(new Date(deliveredAt).getTime() + gigReviewDays * 24 * 60 * 60 * 1000).toISOString();
+            } else if (responseDeadline) {
+              activeOrder.responseDeadline = responseDeadline;
             }
             if (Array.isArray(activeOrder.revisions)) {
               for (const rev of activeOrder.revisions) {
