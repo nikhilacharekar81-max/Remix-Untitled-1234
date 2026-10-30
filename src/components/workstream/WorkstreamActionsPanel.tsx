@@ -3,7 +3,7 @@ import {
   ShieldCheck, ArrowRight, FileText, Paperclip, AlertTriangle, 
   RotateCcw, CheckCircle2, PlusCircle, Settings, Send, Video, Star, Receipt, FileSignature
 } from 'lucide-react';
-import { WorkstreamItem, WorkstreamOffer } from './types';
+import { WorkstreamItem, WorkstreamOffer, isInquiryWorkstream } from './types';
 import { UserAccount } from '../../types';
 import { isOrderVeryLate } from '../../utils/deadlineUtils';
 
@@ -48,6 +48,7 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
   onAcceptCancelRequest,
   onOpenVeryLateCancelModal
 }) => {
+  const isCustomOrderStream = isInquiryWorkstream(order);
   const isBuyer = currentUser?.id === order.buyerId;
   const isSeller = currentUser?.id === order.sellerId;
   const isCompleted = order.status === 'completed';
@@ -72,7 +73,7 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
           >
             <div className="flex items-center gap-2.5">
               <ShieldCheck className="w-4 h-4" />
-              <span>{pendingInvoice ? `Pay Invoice (${pendingInvoice.number})` : 'Approve & Release Escrow'}</span>
+              <span>{pendingInvoice ? (isCustomOrderStream ? `Pay Custom Order Invoice (${pendingInvoice.number})` : `Pay Invoice (${pendingInvoice.number})`) : (isCustomOrderStream ? 'Approve & Release Custom Order Escrow' : 'Approve & Release Escrow')}</span>
             </div>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
@@ -81,14 +82,14 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
         {isBuyer && activeEscrow > 0 && !isDelivered && (order.status === 'in_progress' || order.status === 'funded_in_escrow') && (
           <div className="text-xs text-blue-800 flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0" />
-            <span>Escrow funded (${activeEscrow.toLocaleString()}). Awaiting seller delivery & invoice.</span>
+            <span>{isCustomOrderStream ? `Escrow funded ($${activeEscrow.toLocaleString()}). Awaiting seller delivery & Custom Order Invoice.` : `Escrow funded ($${activeEscrow.toLocaleString()}). Awaiting seller delivery & invoice.`}</span>
           </div>
         )}
 
         {isBuyer && !isCompleted && order.status === 'revision' && (
           <div className="text-xs text-purple-800 flex items-center gap-2">
             <RotateCcw className="w-4 h-4 text-purple-600 shrink-0" />
-            <span>Revision requested. Seller is updating deliverables & invoice.</span>
+            <span>{isCustomOrderStream ? 'Revision requested. Seller is updating deliverables & Custom Order Invoice.' : 'Revision requested. Seller is updating deliverables & invoice.'}</span>
           </div>
         )}
 
@@ -194,11 +195,17 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
             <div className="flex items-center gap-2.5">
               <Receipt className="w-4 h-4 text-emerald-400" />
               <span>
-                {order.status === 'revision'
-                  ? 'Submit Revised Invoice & Work'
-                  : pendingInvoice
-                    ? 'Update Delivery & Invoice'
-                    : 'Raise Invoice & Deliver Work'}
+                {isCustomOrderStream
+                  ? (order.status === 'revision'
+                      ? 'Submit Revised Custom Order Invoice & Work'
+                      : pendingInvoice
+                        ? 'Update Custom Order Invoice & Delivery'
+                        : 'Raise Custom Order Invoice & Deliver Work')
+                  : (order.status === 'revision'
+                      ? 'Submit Revised Invoice & Work'
+                      : pendingInvoice
+                        ? 'Update Delivery & Invoice'
+                        : 'Raise Invoice & Deliver Work')}
               </span>
             </div>
             <ArrowRight className="w-3.5 h-3.5" />
@@ -206,7 +213,7 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
         )}
 
         {/* PEOPLEPERHOUR GIG PROPOSAL LOCK / UNLOCK INDICATOR */}
-        {isSeller && order.type === 'gig' && !invoiceAlreadyPaid && (
+        {isSeller && order.type === 'gig' && !invoiceAlreadyPaid && !isCustomOrderStream && (
           <div className="text-xs text-amber-800 leading-relaxed forced-13-17">
             <strong>Pre-Funded Gig WorkStream:</strong> New proposals are locked while the initial Gig escrow is active. Deliver the work and get your first invoice paid to unlock follow-on proposals.
           </div>
@@ -216,7 +223,11 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
           <div className="text-xs font-medium text-emerald-800 flex items-center gap-2">
             <FileSignature className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>
-              <strong>Invoice Paid!</strong> WorkStream remains open for chat and you can now send a <strong>New Proposal</strong> in the composer below for follow-on work.
+              {isCustomOrderStream ? (
+                <><strong>Custom Order Completed!</strong> WorkStream remains open for chat and you can now send a <strong>Custom Order Proposal</strong> in the composer below for follow-on work.</>
+              ) : (
+                <><strong>Invoice Paid!</strong> WorkStream remains open for chat and you can now send a <strong>New Proposal</strong> in the composer below for follow-on work.</>
+              )}
             </span>
           </div>
         )}
@@ -225,7 +236,7 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
         {isCompleted && activeEscrow <= 0 && (
           <div className="text-emerald-800 text-xs font-medium flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>Invoice paid & funds credited to seller wallet. Chat remains open.</span>
+            <span>{isCustomOrderStream ? 'Custom Order Completed • Invoice paid & funds credited to seller wallet. Chat remains open.' : 'Invoice paid & funds credited to seller wallet. Chat remains open.'}</span>
           </div>
         )}
 

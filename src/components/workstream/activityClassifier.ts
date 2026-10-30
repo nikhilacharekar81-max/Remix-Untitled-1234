@@ -101,15 +101,17 @@ export function classifyActivityEvent(msg: WorkstreamMessage): ClassifiedEvent {
     action === 'offer_paid' ||
     (offerKind === 'invoice' && action === 'offer_accepted') ||
     /invoice.*paid/i.test(text) ||
+    /custom order completed/i.test(text) ||
     (offerKind === 'invoice' && /paid|accepted/i.test(text)) ||
     (/^INV-\d+/i.test(text) && /accepted|paid/i.test(text)) ||
     (/paid.*escrow was released/i.test(text))
   ) {
+    const isCustom = /custom order/i.test(text) || meta.isCustomOrder;
     return {
       category: 'invoice',
-      categoryLabel: 'Invoice Paid',
-      badgeLabel: 'Paid & Released',
-      title: 'Invoice Paid & Escrow Released to Seller',
+      categoryLabel: isCustom ? 'Custom Order Completed' : 'Invoice Paid',
+      badgeLabel: isCustom ? 'Custom Order Completed' : 'Paid & Released',
+      title: isCustom ? 'Custom Order Completed & Escrow Paid' : 'Invoice Paid & Escrow Released to Seller',
       description: cleanText,
       iconName: 'Receipt',
       headerCls: 'bg-emerald-50/90 border-b border-emerald-100 text-emerald-950',
@@ -121,11 +123,12 @@ export function classifyActivityEvent(msg: WorkstreamMessage): ClassifiedEvent {
   }
 
   if (offerKind === 'invoice' && action === 'offer_declined') {
+    const isCustom = /custom order/i.test(text) || meta.isCustomOrder;
     return {
       category: 'invoice',
-      categoryLabel: 'Invoice Declined',
+      categoryLabel: isCustom ? 'Custom Order Invoice Declined' : 'Invoice Declined',
       badgeLabel: 'Declined',
-      title: 'Invoice Declined by Buyer',
+      title: isCustom ? 'Custom Order Invoice Declined by Buyer' : 'Invoice Declined by Buyer',
       description: cleanText,
       iconName: 'AlertTriangle',
       headerCls: 'bg-rose-50/90 border-b border-rose-100 text-rose-950',
@@ -137,11 +140,12 @@ export function classifyActivityEvent(msg: WorkstreamMessage): ClassifiedEvent {
   }
 
   if (offerKind === 'invoice' && action === 'offer_cancelled') {
+    const isCustom = /custom order/i.test(text) || meta.isCustomOrder;
     return {
       category: 'invoice',
-      categoryLabel: 'Invoice Cancelled',
+      categoryLabel: isCustom ? 'Custom Order Invoice Cancelled' : 'Invoice Cancelled',
       badgeLabel: 'Cancelled',
-      title: 'Invoice Cancelled by Seller',
+      title: isCustom ? 'Custom Order Invoice Cancelled by Seller' : 'Invoice Cancelled by Seller',
       description: cleanText,
       iconName: 'RotateCcw',
       headerCls: 'bg-slate-100 border-b border-slate-200 text-slate-900',
@@ -156,13 +160,15 @@ export function classifyActivityEvent(msg: WorkstreamMessage): ClassifiedEvent {
   if (
     (offerKind === 'proposal' && action === 'offer_accepted') ||
     action === 'proposal_accepted' ||
+    /custom order proposal.*accepted/i.test(text) ||
     (/^PRP-\d+/i.test(text) && /accepted/i.test(text))
   ) {
+    const isCustom = /custom order/i.test(text) || meta.isCustomOrder;
     return {
       category: 'proposal',
-      categoryLabel: 'Proposal Accepted',
-      badgeLabel: 'Escrow Funded',
-      title: 'Proposal Accepted & Escrow Funded',
+      categoryLabel: isCustom ? 'Custom Order Created' : 'Proposal Accepted',
+      badgeLabel: isCustom ? 'Custom Order Active' : 'Escrow Funded',
+      title: isCustom ? 'Custom Order Proposal Accepted & Escrow Funded' : 'Proposal Accepted & Escrow Funded',
       description: cleanText,
       iconName: 'FileSignature',
       headerCls: 'bg-emerald-50/90 border-b border-emerald-100 text-emerald-950',
@@ -176,14 +182,16 @@ export function classifyActivityEvent(msg: WorkstreamMessage): ClassifiedEvent {
   if (
     action === 'proposal_submitted' ||
     action === 'proposal_received' ||
+    /custom order proposal/i.test(text) ||
     /proposal submitted|custom proposal received/i.test(text) ||
     (/^PRP-\d+/i.test(text) && !/accepted|paid|declined/i.test(text))
   ) {
+    const isCustom = /custom order proposal/i.test(text) || meta.isCustomOrder;
     return {
       category: 'proposal',
-      categoryLabel: 'Custom Proposal',
+      categoryLabel: isCustom ? 'Custom Order Proposal' : 'Custom Proposal',
       badgeLabel: 'Under Review',
-      title: 'Proposal Submitted for Review',
+      title: isCustom ? 'Custom Order Proposal Submitted for Review' : 'Proposal Submitted for Review',
       description: cleanText,
       iconName: 'FileSignature',
       headerCls: 'bg-emerald-50/70 border-b border-emerald-100/90 text-emerald-950',
@@ -199,11 +207,12 @@ export function classifyActivityEvent(msg: WorkstreamMessage): ClassifiedEvent {
     (offerKind === 'proposal' && action === 'offer_declined') ||
     /proposal declined/i.test(text)
   ) {
+    const isCustom = /custom order/i.test(text) || meta.isCustomOrder;
     return {
       category: 'proposal',
-      categoryLabel: 'Proposal Declined',
+      categoryLabel: isCustom ? 'Custom Order Proposal Declined' : 'Proposal Declined',
       badgeLabel: 'Declined',
-      title: 'Proposal Declined by Buyer',
+      title: isCustom ? 'Custom Order Proposal Declined by Buyer' : 'Proposal Declined by Buyer',
       description: cleanText,
       iconName: 'AlertTriangle',
       headerCls: 'bg-rose-50/90 border-b border-rose-100 text-rose-950',
@@ -217,13 +226,15 @@ export function classifyActivityEvent(msg: WorkstreamMessage): ClassifiedEvent {
   if (
     action === 'proposal_withdrawn' ||
     (offerKind === 'proposal' && action === 'offer_cancelled') ||
-    /proposal withdrawn/i.test(text)
+    /proposal withdrawn/i.test(text) ||
+    /custom order proposal.*cancelled/i.test(text)
   ) {
+    const isCustom = /custom order/i.test(text) || meta.isCustomOrder;
     return {
       category: 'proposal',
-      categoryLabel: 'Proposal Withdrawn',
-      badgeLabel: 'Withdrawn',
-      title: 'Proposal Withdrawn by Freelancer',
+      categoryLabel: isCustom ? 'Custom Order Proposal Cancelled' : 'Proposal Withdrawn',
+      badgeLabel: isCustom ? 'Cancelled' : 'Withdrawn',
+      title: isCustom ? 'Custom Order Proposal Cancelled by Seller' : 'Proposal Withdrawn by Freelancer',
       description: cleanText,
       iconName: 'RotateCcw',
       headerCls: 'bg-slate-100 border-b border-slate-200 text-slate-900',
@@ -432,14 +443,16 @@ export function classifyActivityEvent(msg: WorkstreamMessage): ClassifiedEvent {
     action === 'order_created' ||
     action === 'order_placed' ||
     /inquiry thread opened/i.test(text) ||
+    /custom order placed/i.test(text) ||
     /^order placed/i.test(text)
   ) {
     const isInquiry = /inquiry thread/i.test(text);
+    const isCustomOrder = /custom order placed/i.test(text) || meta.isCustomOrder;
     return {
       category: 'order',
-      categoryLabel: isInquiry ? 'Inquiry Opened' : 'Order Placed',
-      badgeLabel: isInquiry ? 'New Inquiry' : 'Escrow Protected',
-      title: isInquiry ? 'New Project Inquiry Initialized' : 'Order Placed in Escrow',
+      categoryLabel: isCustomOrder ? 'Custom Order Placed' : isInquiry ? 'Inquiry Opened' : 'Order Placed',
+      badgeLabel: isCustomOrder ? 'Custom Order • Escrow Funded' : isInquiry ? 'New Inquiry' : 'Escrow Protected',
+      title: isCustomOrder ? 'Custom Order Placed in Escrow' : isInquiry ? 'New Project Inquiry Initialized' : 'Order Placed in Escrow',
       description: cleanText,
       iconName: 'Briefcase',
       headerCls: 'bg-blue-50/90 border-b border-blue-100 text-blue-950',

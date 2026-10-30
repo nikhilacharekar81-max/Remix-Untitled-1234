@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Search, Star, ShieldCheck, Clock, CheckCircle2, AlertCircle, ArrowUpRight, MessageSquare, PlusCircle } from 'lucide-react';
-import { WorkstreamItem } from './types';
+import { WorkstreamItem, isInquiryWorkstream } from './types';
 import { getStatusBadge } from '../../utils/formatters';
 import { DEFAULT_AVATAR } from '../../constants';
 
@@ -307,7 +307,9 @@ export const WorkstreamList: React.FC<WorkstreamListProps> = ({
                       ${w.amount.toLocaleString()}
                     </span>
                     <span className="text-[10px] text-emerald-600 dark:text-emerald-400 block font-medium">
-                      {w.amount > 0 ? 'Escrow Protected' : 'Inquiry'}
+                      {isInquiryWorkstream(w as any) 
+                        ? (w.status === 'completed' ? 'Custom Order Completed' : w.amount > 0 ? 'Custom Order · In Escrow' : 'Custom Order Proposal')
+                        : (w.amount > 0 ? 'Escrow Protected' : 'Inquiry')}
                     </span>
                   </div>
                 </div>
@@ -419,7 +421,7 @@ export const WorkstreamList: React.FC<WorkstreamListProps> = ({
                               {partner?.name || 'Collaborator'}
                             </span>
                             <span className="text-xs text-slate-400 font-mono">
-                              Order #{w.id}
+                              {isInquiryWorkstream(w as any) ? (w.amount > 0 ? `Custom Order #${w.id}` : `Proposal #${w.id}`) : `Order #${w.id}`}
                             </span>
                           </div>
                         </div>
@@ -444,7 +446,15 @@ export const WorkstreamList: React.FC<WorkstreamListProps> = ({
                         <span className={`text-xs block font-medium ${
                           w.status === 'completed' ? 'text-slate-500' : w.status === 'cancelled' ? 'text-rose-500' : 'text-emerald-600 dark:text-emerald-400'
                         }`}>
-                          {w.status === 'completed' ? 'Escrow Released ($0 Held)' : w.status === 'cancelled' ? 'Refunded ($0 Held)' : w.amount > 0 ? '100% in Escrow' : 'Unfunded'}
+                          {isInquiryWorkstream(w as any) ? (
+                            w.status === 'completed' ? 'Custom Order Completed ($0 Held)' :
+                            w.status === 'cancelled' ? 'Refunded ($0 Held)' :
+                            w.amount > 0 ? 'Custom Order · 100% in Escrow' : 'Custom Order Proposal'
+                          ) : (
+                            w.status === 'completed' ? 'Escrow Released ($0 Held)' :
+                            w.status === 'cancelled' ? 'Refunded ($0 Held)' :
+                            w.amount > 0 ? '100% in Escrow' : 'Unfunded'
+                          )}
                         </span>
                       </td>
                       <td className="py-4 px-4 text-right">

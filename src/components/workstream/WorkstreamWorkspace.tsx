@@ -3,7 +3,7 @@ import {
   ChevronLeft, ShieldCheck, Clock, CheckCircle2, AlertCircle, 
   RotateCcw, Activity, FolderOpen, Send, Sparkles, MessageSquare, Video, Star, Receipt
 } from 'lucide-react';
-import { WorkstreamItem, WorkstreamMessage, SharedFileItem, WorkstreamSubTab } from './types';
+import { WorkstreamItem, WorkstreamMessage, SharedFileItem, WorkstreamSubTab, isInquiryWorkstream } from './types';
 import { UserAccount, Order } from '../../types';
 import { WorkstreamActivityStream } from './WorkstreamActivityStream';
 import { WorkstreamMessageInput } from './WorkstreamMessageInput';
@@ -238,13 +238,14 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
   const pendingProposal = currentOrderOffers.find(o => o.kind === 'proposal' && o.status === 'pending');
   const invoiceAlreadyPaid = hasPaidInvoice || Boolean((order as any).hasPaidInvoice) || currentOrderOffers.some(o => o.kind === 'invoice' && o.status === 'paid') || order.status === 'completed';
   const activeEscrow = escrowRemaining > 0 ? escrowRemaining : (escrowFunded ? Number(order.amount || 0) : 0);
-  const isInquiryOrder = (!escrowFunded && Number(order.amount || 0) === 0) || /^inquiry:/i.test(order.title || '');
+  const isCustomOrderWorkstream = isInquiryWorkstream(order);
+  const isInquiryOrder = (!escrowFunded && Number(order.amount || 0) === 0) || /^inquiry:/i.test(order.title || '') || (isCustomOrderWorkstream && !escrowFunded);
 
   // PeoplePerHour Gig vs Project Proposal rules:
   // - For Paid Gigs: Seller CANNOT send a new proposal initially because the Gig is already pre-funded.
   //   Once the first invoice is paid, or if the thread is an unfunded Pre-Purchase Inquiry, Seller CAN send proposals in the same WorkStream!
   // - For Projects: Seller can send a proposal when no active escrow/invoice is blocking, or after an invoice is paid.
-  const isGigInitiallyLocked = (order.type === 'gig' || (order as any).orderType === 'gig') && !invoiceAlreadyPaid && !isInquiryOrder;
+  const isGigInitiallyLocked = (order.type === 'gig' || (order as any).orderType === 'gig') && !invoiceAlreadyPaid && !isInquiryOrder && !isCustomOrderWorkstream;
   const canSendProposal = isSeller
     && !pendingInvoice
     && !pendingProposal
@@ -257,22 +258,22 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
     && !pendingInvoice;
 
   const proposalHint = !isSeller
-    ? 'Only the seller can send a proposal'
+    ? (isCustomOrderWorkstream ? 'Only the seller can send a Custom Order Proposal' : 'Only the seller can send a proposal')
     : isGigInitiallyLocked
       ? 'This Gig is already funded in Escrow. Deliver the work and raise your first invoice — once it is paid, you can send follow-on proposals.'
       : pendingInvoice
-        ? 'Cannot send a proposal while an invoice is awaiting payment.'
+        ? (isCustomOrderWorkstream ? 'Cannot send a Custom Order Proposal while a Custom Order Invoice is awaiting payment.' : 'Cannot send a proposal while an invoice is awaiting payment.')
         : pendingProposal
-          ? 'A proposal is already awaiting the buyer\'s response.'
+          ? (isCustomOrderWorkstream ? 'A Custom Order Proposal is already awaiting the buyer\'s response.' : 'A proposal is already awaiting the buyer\'s response.')
           : escrowFunded && !invoiceAlreadyPaid
-            ? 'Escrow is already funded for this stage. Raise an invoice to complete the current work first.'
-            : 'Send a custom proposal for this inquiry or additional scope.';
+            ? (isCustomOrderWorkstream ? 'Escrow is already funded for this Custom Order. Raise a Custom Order Invoice to complete the current work first.' : 'Escrow is already funded for this stage. Raise an invoice to complete the current work first.')
+            : (isCustomOrderWorkstream ? 'Send a Custom Order Proposal for this inquiry or additional scope.' : 'Send a custom proposal for this inquiry or additional scope.');
 
   const invoiceHint = !isSeller
-    ? 'Only the seller can raise an invoice'
+    ? (isCustomOrderWorkstream ? 'Only the seller can raise a Custom Order Invoice' : 'Only the seller can raise an invoice')
     : pendingInvoice
-      ? 'An invoice is already awaiting buyer payment.'
-      : 'Invoices require an active funded Escrow deposit. Send a Proposal first so the buyer can fund Escrow.';
+      ? (isCustomOrderWorkstream ? 'A Custom Order Invoice is already awaiting buyer payment.' : 'An invoice is already awaiting buyer payment.')
+      : (isCustomOrderWorkstream ? 'Invoices require an active funded Custom Order. Send a Custom Order Proposal first so the buyer can fund Escrow.' : 'Invoices require an active funded Escrow deposit. Send a Proposal first so the buyer can fund Escrow.');
 
   // Refresh parent order state when an offer or review or escrow action occurs in the stream
   const lastMessage = messages.length ? messages[messages.length - 1] : undefined;
@@ -416,7 +417,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
       return (
         <span className="px-3 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-          <span>Invoice Paid • WorkStream Open</span>
+          <span>{isCustomOrderWorkstream ? 'Custom Order Completed' : 'Invoice Paid • WorkStream Open'}</span>
         </span>
       );
     }
@@ -424,7 +425,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
       return (
         <span className="px-3 py-1 bg-rose-50 text-rose-800 border border-rose-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
           <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
-          <span>Order Cancelled • WorkStream Open</span>
+          <span>{isCustomOrderWorkstream ? 'Custom Order Cancelled • WorkStream Open' : 'Order Cancelled • WorkStream Open'}</span>
         </span>
       );
     }
@@ -432,7 +433,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
       return (
         <span className="px-3 py-1 bg-indigo-50 text-indigo-800 border border-indigo-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
           <MessageSquare className="w-3.5 h-3.5 text-indigo-600" />
-          <span>Inquiry • Pre-Purchase</span>
+          <span>{isCustomOrderWorkstream ? 'Custom Order Proposal • Pre-Purchase' : 'Inquiry • Pre-Purchase'}</span>
         </span>
       );
     }
@@ -440,7 +441,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
       return (
         <span className="px-3 py-1 bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
           <Clock className="w-3.5 h-3.5 text-amber-600" />
-          <span>Invoice Raised • Awaiting Buyer Payment</span>
+          <span>{isCustomOrderWorkstream ? 'Custom Order Invoice Raised • Awaiting Buyer Payment' : 'Invoice Raised • Awaiting Buyer Payment'}</span>
         </span>
       );
     }
@@ -455,7 +456,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
     return (
       <span className="px-3 py-1 bg-blue-50 text-blue-800 border border-blue-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
         <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-        <span>In Escrow ({currencySymbol}{Number(activeEscrow || order.amount || 0).toLocaleString()})</span>
+        <span>{isCustomOrderWorkstream ? 'Custom Order • In Escrow' : 'In Escrow'} ({currencySymbol}{Number(activeEscrow || order.amount || 0).toLocaleString()})</span>
       </span>
     );
   };
@@ -556,7 +557,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-sm flex items-center gap-1.5 shadow-xs transition cursor-pointer"
               >
                 <ShieldCheck className="w-4 h-4" />
-                <span>{pendingInvoice ? `Pay Invoice (${pendingInvoice.number})` : 'Release Escrow'}</span>
+                <span>{isCustomOrderWorkstream ? (pendingInvoice ? `Pay Custom Order Invoice (${pendingInvoice.number})` : 'Release Custom Order Escrow') : (pendingInvoice ? `Pay Invoice (${pendingInvoice.number})` : 'Release Escrow')}</span>
               </button>
             )}
 
@@ -712,6 +713,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                     onOpenDisputeModal={() => setIsDisputeModalOpen(true)}
                     onStartVideoCall={() => setIsVideoCallModalOpen(true)}
                     onRespondToExtension={handleRespondExtension}
+                    isCustomOrderStream={isCustomOrderWorkstream}
                   />
                   <WorkstreamMessageInput
                     key={order.id}
@@ -734,6 +736,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                     proposalHint={proposalHint}
                     invoiceHint={invoiceHint}
                     currencySymbol={currencySymbol}
+                    isCustomOrderStream={isCustomOrderWorkstream}
                   />
                 </>
               ) : activeSubTab === 'files' ? (

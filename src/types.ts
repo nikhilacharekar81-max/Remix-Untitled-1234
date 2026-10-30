@@ -170,6 +170,7 @@ export interface Workspace {
   status: 'active' | 'archived';
   activeOrderId?: string;
   orderIds?: string[];
+  metadata?: Record<string, any>;
 }
 
 export interface GigOrder extends Order {
@@ -256,6 +257,9 @@ export interface Order {
   hasPaidInvoice?: boolean;
   type?: 'gig' | 'project';
   reviewWindowRestartedAt?: string;
+  metadata?: Record<string, any>;
+  isCustomOrder?: boolean;
+  isInquiry?: boolean;
   cancellationRequest?: {
     requestedBy: 'buyer' | 'seller';
     requesterId: string;

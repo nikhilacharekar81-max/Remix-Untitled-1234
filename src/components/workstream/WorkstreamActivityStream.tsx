@@ -8,7 +8,7 @@ import {
   Award, ShieldAlert, Video, PhoneMissed, Layers,
   DollarSign, Check, MoreHorizontal, Ban, X
 } from 'lucide-react';
-import { WorkstreamMessage, WorkstreamOffer, WorkstreamItem } from './types';
+import { WorkstreamMessage, WorkstreamOffer, WorkstreamItem, isInquiryWorkstream } from './types';
 import { UserAccount } from '../../types';
 import { DEFAULT_AVATAR } from '../../constants';
 import {
@@ -48,6 +48,7 @@ interface WorkstreamActivityStreamProps {
   onOpenDisputeModal?: () => void;
   onStartVideoCall?: () => void;
   onRespondToExtension?: (action: 'approve' | 'reject', reason?: string) => Promise<{ ok: boolean; error?: string }>;
+  isCustomOrderStream?: boolean;
 }
 
 export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> = ({
@@ -75,7 +76,8 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
   onOpenReviewModal,
   onOpenDisputeModal,
   onStartVideoCall,
-  onRespondToExtension
+  onRespondToExtension,
+  isCustomOrderStream
 }) => {
   const hasMultipleOrders = workspaceOrders.length > 1;
   const scrollEndRef = useRef<HTMLDivElement>(null);
@@ -202,11 +204,21 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
     const isConfirmingThis = confirmingOffer?.offer.id === offer.id;
     const isExpanded = !!expandedOfferIds[offer.id];
 
+    const isCustomOrderStreamLocal = isCustomOrderStream || isInquiryWorkstream(order) || Boolean(
+      offer?.metadata?.isInquiry ||
+      offer?.metadata?.isCustomOrder ||
+      (offer?.workspaceId && !offer?.orderId)
+    );
+
     // Header title & icon matching reference image:
     // "Invoice Received" / "Proposal Received" for buyer; "Invoice Sent" / "Proposal Sent" for seller
     const headerTitle = isInvoice
-      ? (iAmBuyer ? 'Invoice Received' : 'Invoice Sent')
-      : (iAmBuyer ? 'Proposal Received' : 'Proposal Sent');
+      ? (isCustomOrderStreamLocal
+          ? (iAmBuyer ? 'Custom Order Invoice Received' : 'Custom Order Invoice Sent')
+          : (iAmBuyer ? 'Invoice Received' : 'Invoice Sent'))
+      : (isCustomOrderStreamLocal
+          ? (iAmBuyer ? 'Custom Order Proposal Received' : 'Custom Order Proposal Sent')
+          : (iAmBuyer ? 'Proposal Received' : 'Proposal Sent'));
 
     const iconTileCls = isInvoice
       ? 'bg-blue-50 text-blue-500'
@@ -228,26 +240,58 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
     // One-line message text matching reference image:
     let messageText = '';
     if (offer.status === 'pending') {
-      if (iAmBuyer) {
-        messageText = `${senderName} has sent you an ${isInvoice ? 'invoice' : 'proposal'} for this Gig Order.`;
-      } else if (iAmSeller) {
-        messageText = `Your ${isInvoice ? 'invoice' : 'proposal'} has been sent to the buyer and is awaiting their response.`;
+      if (isCustomOrderStreamLocal) {
+        if (isInvoice) {
+          if (iAmBuyer) {
+            messageText = `${senderName} has sent you a Custom Order Invoice for this Custom Order.`;
+          } else if (iAmSeller) {
+            messageText = `Your Custom Order Invoice has been sent to the buyer and is awaiting their response.`;
+          } else {
+            messageText = `${senderName} has sent a Custom Order Invoice for this Custom Order.`;
+          }
+        } else {
+          if (iAmBuyer) {
+            messageText = `${senderName} has sent you a Custom Order Proposal.`;
+          } else if (iAmSeller) {
+            messageText = `Your Custom Order Proposal has been sent to the buyer and is awaiting their response.`;
+          } else {
+            messageText = `${senderName} has sent a Custom Order Proposal.`;
+          }
+        }
       } else {
-        messageText = `${senderName} has sent an ${isInvoice ? 'invoice' : 'proposal'} for this Gig Order.`;
+        if (iAmBuyer) {
+          messageText = `${senderName} has sent you an ${isInvoice ? 'invoice' : 'proposal'} for this ${order?.orderType === 'project' ? 'Project' : 'Gig Order'}.`;
+        } else if (iAmSeller) {
+          messageText = `Your ${isInvoice ? 'invoice' : 'proposal'} has been sent to the buyer and is awaiting their response.`;
+        } else {
+          messageText = `${senderName} has sent an ${isInvoice ? 'invoice' : 'proposal'} for this ${order?.orderType === 'project' ? 'Project' : 'Gig Order'}.`;
+        }
       }
     } else if (offer.status === 'accepted' || offer.status === 'paid') {
-      messageText = `The ${isInvoice ? 'invoice' : 'proposal'} has been accepted and processed.`;
+      if (isCustomOrderStreamLocal) {
+        if (isInvoice) {
+          messageText = `The Custom Order Invoice has been accepted, payment was released, and the Custom Order is Completed.`;
+        } else {
+          messageText = `The Custom Order Proposal has been accepted and escrow was funded to create the Custom Order.`;
+        }
+      } else {
+        messageText = `The ${isInvoice ? 'invoice' : 'proposal'} has been accepted and processed.`;
+      }
     } else if (offer.status === 'declined') {
-      messageText = `The ${isInvoice ? 'invoice' : 'proposal'} was rejected by the buyer.`;
+      messageText = `The ${isCustomOrderStreamLocal ? (isInvoice ? 'Custom Order Invoice' : 'Custom Order Proposal') : (isInvoice ? 'invoice' : 'proposal')} was rejected by the buyer.`;
     } else if (offer.status === 'cancelled') {
-      messageText = `The ${isInvoice ? 'invoice' : 'proposal'} was cancelled by the seller.`;
+      messageText = `The ${isCustomOrderStreamLocal ? (isInvoice ? 'Custom Order Invoice' : 'Custom Order Proposal') : (isInvoice ? 'invoice' : 'proposal')} was cancelled by the seller.`;
     } else {
-      messageText = `The ${isInvoice ? 'invoice' : 'proposal'} has expired.`;
+      messageText = `The ${isCustomOrderStreamLocal ? (isInvoice ? 'Custom Order Invoice' : 'Custom Order Proposal') : (isInvoice ? 'invoice' : 'proposal')} has expired.`;
     }
 
-    const amountLabel = isInvoice ? 'Invoice Amount' : 'Proposal Amount';
+    const amountLabel = isInvoice
+      ? (isCustomOrderStreamLocal ? 'Custom Order Invoice Amount' : 'Invoice Amount')
+      : (isCustomOrderStreamLocal ? 'Custom Order Proposal Amount' : 'Proposal Amount');
     const formattedAmount = `${sym}${Number(offer.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    const detailsLinkText = isInvoice ? 'View invoice details' : 'View proposal details';
+    const detailsLinkText = isInvoice
+      ? (isCustomOrderStreamLocal ? 'View Custom Order Invoice details' : 'View invoice details')
+      : (isCustomOrderStreamLocal ? 'View Custom Order Proposal details' : 'View proposal details');
 
     return (
       <div key={keyStr} className="flex justify-center my-4">
@@ -452,8 +496,8 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                     <ShieldCheck className="w-4 h-4 text-emerald-600" />
                     <span>
                       {isInvoice
-                        ? `Confirm Payment: Invoice ${offer.number || ''} (${sym}${offer.amount.toLocaleString()})`
-                        : `Confirm Accept & Pay (${sym}${offer.amount.toLocaleString()})`}
+                        ? `Confirm Payment: ${isCustomOrderStreamLocal ? 'Custom Order Invoice' : 'Invoice'} ${offer.number || ''} (${sym}${offer.amount.toLocaleString()})`
+                        : `Confirm Accept & Pay: ${isCustomOrderStreamLocal ? 'Custom Order Proposal' : 'Proposal'} (${sym}${offer.amount.toLocaleString()})`}
                     </span>
                   </div>
                   <p className="text-xs text-emerald-900 leading-relaxed font-mono tabular-nums">
@@ -461,10 +505,10 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                       hasAdditional ? (
                         <>Releases <strong>{sym}{activeEscrow.toLocaleString()}</strong> from Escrow and debits <strong>{sym}{Number(offer.clientAdditionalTotal ?? (offer.amount - activeEscrow)).toLocaleString()}</strong> from your wallet.</>
                       ) : (
-                        <>Releases <strong>{sym}{offer.amount.toLocaleString()}</strong> directly from your funded Escrow deposit to the seller's wallet. No extra wallet charge.</>
+                        <>Releases <strong>{sym}{offer.amount.toLocaleString()}</strong> directly from your funded Escrow deposit to the seller's wallet to complete the {isCustomOrderStreamLocal ? 'Custom Order' : 'order'}.</>
                       )
                     ) : (
-                      <>Funds <strong>{sym}{offer.amount.toLocaleString()}</strong> into WorkPerHour Escrow Vault under protection (total wallet debit: <strong>{sym}{Number(offer.clientTotal ?? offer.amount).toLocaleString()}</strong> incl. fees).</>
+                      <>Funds <strong>{sym}{offer.amount.toLocaleString()}</strong> into Escrow Vault under protection to create your {isCustomOrderStreamLocal ? 'Custom Order' : 'order'} (total wallet debit: <strong>{sym}{Number(offer.clientTotal ?? offer.amount).toLocaleString()}</strong> incl. fees).</>
                     )}
                   </p>
                   <div className="flex items-center gap-2 pt-1">
@@ -500,9 +544,11 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                   >
                     {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ban className="w-4 h-4 text-slate-600" />}
                     <span>
-                      {order?.orderType === 'project'
-                        ? (isInvoice ? 'Cancel / Withdraw' : 'Cancel Proposal')
-                        : `Cancel ${isInvoice ? 'Invoice' : 'Proposal'}`}
+                      {isCustomOrderStreamLocal
+                        ? `Cancel ${isInvoice ? 'Custom Order Invoice' : 'Custom Order Proposal'}`
+                        : order?.orderType === 'project'
+                          ? (isInvoice ? 'Cancel / Withdraw' : 'Cancel Proposal')
+                          : `Cancel ${isInvoice ? 'Invoice' : 'Proposal'}`}
                     </span>
                   </button>
                 </div>

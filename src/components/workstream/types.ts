@@ -117,3 +117,14 @@ export const WORKSTREAM_TAB_STATUSES = {
   completed: ['completed'],
   archived: ['cancelled', 'disputed']
 } as const;
+
+export function isInquiryWorkstream(order?: any, workspace?: any): boolean {
+  if (!order && !workspace) return false;
+  if (order?.isInquiry || order?.isCustomOrder || order?.customOrderFromInquiry) return true;
+  if (order?.metadata?.isInquiry || order?.metadata?.isCustomOrder || order?.metadata?.customOrderFromInquiry) return true;
+  if (typeof order?.id === 'string' && order.id.startsWith('ws-')) return true;
+  if (typeof order?.title === 'string' && /^inquiry:/i.test(order.title)) return true;
+  if ((workspace?.metadata as any)?.isInquiry || (workspace as any)?.isInquiry) return true;
+  return false;
+}
+

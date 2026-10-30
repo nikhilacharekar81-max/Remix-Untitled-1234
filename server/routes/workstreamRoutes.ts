@@ -996,29 +996,30 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
             throw err;
           }
           order = lockedOrder;
+          const activeOrder: Order = lockedOrder;
 
-          if (caller.id !== order.sellerId) {
+          if (caller.id !== activeOrder.sellerId) {
             const err: any = new Error('Only the seller of this workstream can send this.');
             err.status = 403;
             throw err;
           }
-          if ((order.status === 'cancelled' || (order.status as string) === 'refunded') && kind === 'invoice') {
+          if ((activeOrder.status === 'cancelled' || (activeOrder.status as string) === 'refunded') && kind === 'invoice') {
             const err: any = new Error('Cannot send a final invoice on a cancelled or refunded order. Send a proposal or deposit to start a follow-on order.');
             err.status = 409;
             throw err;
           }
 
-          const escRow = await financialRepository.getEscrow(order.id, client);
-          const txFunded = Boolean(escRow && (Number(escRow.funded || 0) > 0 || Number(escRow.remaining || 0) > 0 || escRow.status === 'funded' || escRow.status === 'released'));
+          const escRow = await financialRepository.getEscrow(activeOrder.id, client);
+          const txFunded = Boolean(escRow && (Number((escRow as any).funded || (escRow as any).fundedGross || 0) > 0 || Number(escRow.remaining || 0) > 0 || (escRow as any).status === 'funded' || escRow.status === 'released'));
           const txActiveEscrow = escRow ? Number(escRow.remaining || 0) : 0;
 
           const lockedOffersRes = await client.query(
             'SELECT * FROM workstream_offers WHERE order_id = $1 FOR UPDATE',
-            [order.id]
+            [activeOrder.id]
           );
-          const txExistingOffers = lockedOffersRes.rows.map(mapOfferRow).filter(o => o.orderId === order!.id);
+          const txExistingOffers = lockedOffersRes.rows.map(mapOfferRow).filter(o => o.orderId === activeOrder.id);
           const txHasPaidFirstInvoice = Boolean(
-            (escRow && (Number(escRow.released || 0) > 0 || escRow.status === 'released')) ||
+            (escRow && (Number((escRow as any).released || escRow.releasedGross || 0) > 0 || escRow.status === 'released')) ||
             txExistingOffers.some(o => o.kind === 'invoice' && (o.status === 'paid' || o.status === 'accepted'))
           );
 
@@ -1044,7 +1045,7 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
               err.status = 409;
               throw err;
             }
-            if ((order.orderType === 'gig' || (order.gigId && !order.projectId)) && txActiveEscrow > 0 && !txHasPaidFirstInvoice) {
+            if ((activeOrder.orderType === 'gig' || (activeOrder.gigId && !activeOrder.projectId)) && txActiveEscrow > 0 && !txHasPaidFirstInvoice) {
               const err: any = new Error('This Gig is already funded in escrow. Please raise and get your first invoice paid before sending a follow-on proposal.');
               err.status = 409;
               throw err;
@@ -1052,21 +1053,21 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
           }
 
           const isGigOrder =
-            order.orderType !== 'project' &&
-            !order.projectId &&
-            (order.orderType === 'gig' || Boolean(order.gigId) || Boolean(order.gigOrderId));
+            activeOrder.orderType !== 'project' &&
+            !activeOrder.projectId &&
+            (activeOrder.orderType === 'gig' || Boolean(activeOrder.gigId) || Boolean(activeOrder.gigOrderId));
           const deliverWorkRequested = isGigOrder ? req.body?.deliverWork !== false : Boolean(req.body?.deliverWork);
           const hasDeliveryEvidence =
             uploadedFiles.length > 0 ||
             Boolean(rawRef) ||
-            (Array.isArray(order.deliverableFiles) && order.deliverableFiles.length > 0) ||
-            (Array.isArray(order.deliveryHistory) && order.deliveryHistory.length > 0);
+            (Array.isArray(activeOrder.deliverableFiles) && activeOrder.deliverableFiles.length > 0) ||
+            (Array.isArray(activeOrder.deliveryHistory) && activeOrder.deliveryHistory.length > 0);
           const isWorkableStatus = isGigOrder
-            ? ['funded_in_escrow', 'in_progress', 'accepted', 'revision', 'draft_review', 'work_in_progress', 'late', 'delivered'].includes(order.status)
-            : ['funded_in_escrow', 'in_progress', 'accepted'].includes(order.status);
+            ? ['funded_in_escrow', 'in_progress', 'accepted', 'revision', 'draft_review', 'work_in_progress', 'late', 'delivered'].includes(activeOrder.status)
+            : ['funded_in_escrow', 'in_progress', 'accepted'].includes(activeOrder.status);
 
           if (isGigOrder && kind === 'invoice' && deliverWorkRequested && !isWorkableStatus) {
-            const err: any = new Error(`Cannot submit a final invoice for an order in "${order.status}" status.`);
+            const err: any = new Error(`Cannot submit a final invoice for an order in "${activeOrder.status}" status.`);
             err.status = 409;
             throw err;
           }
@@ -1076,13 +1077,13 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
             : (kind === 'invoice' && deliverWorkRequested && hasDeliveryEvidence && isWorkableStatus);
 
           if (shouldTransitionOrderToDelivered) {
-            if (!order.deliverableFiles) order.deliverableFiles = [];
-            if (!order.deliveryHistory) order.deliveryHistory = [];
-            if (uploadedFiles.length > 0) order.deliverableFiles.push(...uploadedFiles);
-            const version = order.deliveryHistory.length + 1;
+            if (!activeOrder.deliverableFiles) activeOrder.deliverableFiles = [];
+            if (!activeOrder.deliveryHistory) activeOrder.deliveryHistory = [];
+            if (uploadedFiles.length > 0) activeOrder.deliverableFiles.push(...uploadedFiles);
+            const version = activeOrder.deliveryHistory.length + 1;
             const sanitizedNotes = note ? escapeHtml(note) : escapeHtml(title);
-            order.deliveryNotes = sanitizedNotes;
-            if (rawRef) order.deliveryReference = rawRef;
+            activeOrder.deliveryNotes = sanitizedNotes;
+            if (rawRef) activeOrder.deliveryReference = rawRef;
             const deliveredAt = new Date().toISOString();
             const deliveryEntry: any = {
               version,
@@ -1092,24 +1093,24 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
               deliveredAt,
               offerId: offer.id
             };
-            order.deliveryHistory.push(deliveryEntry);
+            activeOrder.deliveryHistory.push(deliveryEntry);
             offer.metadata = {
               ...(offer.metadata || {}),
               deliveryVersion: version
             };
-            order.status = 'delivered';
+            activeOrder.status = 'delivered';
             if (isGigOrder) {
               const gigReviewDays = getReviewWindowDays();
-              order.reviewWindowDays = gigReviewDays;
-              order.reviewWindowExpiresAt = new Date(new Date(deliveredAt).getTime() + gigReviewDays * 24 * 60 * 60 * 1000).toISOString();
+              activeOrder.reviewWindowDays = gigReviewDays;
+              activeOrder.reviewWindowExpiresAt = new Date(new Date(deliveredAt).getTime() + gigReviewDays * 24 * 60 * 60 * 1000).toISOString();
             }
-            if (Array.isArray(order.revisions)) {
-              for (const rev of order.revisions) {
+            if (Array.isArray(activeOrder.revisions)) {
+              for (const rev of activeOrder.revisions) {
                 if (rev.status === 'requested') rev.status = 'resolved';
               }
             }
             await saveOfferToDb(offer, client);
-            await store.saveOrder(order, client);
+            await store.saveOrder(activeOrder, client);
           } else {
             await saveOfferToDb(offer, client);
           }
@@ -1122,6 +1123,8 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
     const targetUserId = isWorkspaceOnly ? workspace.buyerId : order!.buyerId;
     const workspaceId = isWorkspaceOnly ? workspace.workspaceId : order!.workspaceId;
 
+    const isCustomOrderStream = isWorkspaceOnly || Boolean(order?.metadata?.isInquiry) || Boolean((order as any)?.metadata?.isCustomOrder);
+
     if (kind === 'invoice') {
       const reviewDays = !isWorkspaceOnly && order!.orderType === 'project'
         ? 7
@@ -1129,23 +1132,30 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       createNotification({
         userId: targetUserId,
         type: 'invoice_received',
-        title: 'Invoice received',
-        message: `You received an invoice of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}". Please review within ${reviewDays} days.`,
+        title: isCustomOrderStream ? 'Custom Order Invoice received' : 'Invoice received',
+        message: isCustomOrderStream
+          ? `You received a Custom Order Invoice of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}". Please review within ${reviewDays} days.`
+          : `You received an invoice of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}". Please review within ${reviewDays} days.`,
         link: `/workstream/${isWorkspaceOnly ? workspaceId : order!.id}`,
-        metadata: { ...(!isWorkspaceOnly ? { orderId: order!.id } : {}), offerId: offer.id }
+        metadata: { ...(!isWorkspaceOnly ? { orderId: order!.id } : {}), offerId: offer.id, isCustomOrder: isCustomOrderStream }
       });
     } else if (kind === 'proposal') {
       createNotification({
         userId: targetUserId,
         type: 'proposal_received',
-        title: 'Proposal received',
-        message: `You received a proposal of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}".`,
+        title: isCustomOrderStream ? 'Custom Order Proposal received' : 'Proposal received',
+        message: isCustomOrderStream
+          ? `You received a Custom Order Proposal of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}".`
+          : `You received a proposal of $${offer.amount} for "${isWorkspaceOnly ? workspace.title : order!.title}".`,
         link: `/workstream/${isWorkspaceOnly ? workspaceId : order!.id}`,
-        metadata: { ...(!isWorkspaceOnly ? { orderId: order!.id } : {}), offerId: offer.id }
+        metadata: { ...(!isWorkspaceOnly ? { orderId: order!.id } : {}), offerId: offer.id, isCustomOrder: isCustomOrderStream }
       });
     }
 
-    await postOfferMessage(isWorkspaceOnly ? (workspace as any) : order!, offer, { id: caller.id, name: caller.name }, `New ${OFFER_LABEL[kind]} ${offer.number}: ${title}`, 'offer_created');
+    const offerPrefix = isCustomOrderStream 
+      ? (kind === 'invoice' ? 'Custom Order Invoice' : 'Custom Order Proposal')
+      : OFFER_LABEL[kind];
+    await postOfferMessage(isWorkspaceOnly ? (workspace as any) : order!, offer, { id: caller.id, name: caller.name }, `New ${offerPrefix} ${offer.number}: ${title}`, 'offer_created');
     res.status(201).json({ offer: await viewOffer(offer), order: order ? enrichOrderWithServiceInfo(order) : null });
   } catch (err: any) {
     const status = err?.status || err?.statusCode || 400;
@@ -1244,14 +1254,17 @@ async function executeUnifiedOfferAccept(
       offer.originOrderId = offer.originOrderId || order.id;
       offer.workspaceId = offer.workspaceId || order.workspaceId;
 
-      if (order.orderType === 'project') {
+      const isCustomOrder = Boolean(order.metadata?.isInquiry || order.metadata?.isCustomOrder);
+      if (order.orderType === 'project' || isCustomOrder) {
         await createNotification({
           userId: order.sellerId,
           type: 'invoice_paid',
-          title: 'Invoice paid',
-          message: `Invoice ${offer.number} for "${order.title}" ($${invoiceAmount}) was approved and paid.`,
+          title: isCustomOrder ? 'Custom Order Invoice paid' : 'Invoice paid',
+          message: isCustomOrder
+            ? `Custom Order Invoice ${offer.number} for "${order.title}" ($${invoiceAmount}) was approved and paid. Custom Order Completed.`
+            : `Invoice ${offer.number} for "${order.title}" ($${invoiceAmount}) was approved and paid.`,
           link: `/workstream/${order.id}`,
-          metadata: { orderId: order.id, offerId: offer.id, amount: invoiceAmount },
+          metadata: { orderId: order.id, offerId: offer.id, amount: invoiceAmount, isCustomOrder },
           client
         }, client);
       }
@@ -1259,9 +1272,10 @@ async function executeUnifiedOfferAccept(
       await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean), client);
       await saveOfferToDb(offer, client);
       await store.saveOrder(order, client);
+      const completionSuffix = isCustomOrder ? 'Custom Order Completed!' : 'Order completed!';
       const completionNote = additionalAmount > 0
-        ? `${offer.number} ($${invoiceAmount.toLocaleString()}) was paid (+$${additionalAmount.toLocaleString()} funded from wallet) and full escrow ($${invoiceAmount.toLocaleString()}) was released to the seller. Order completed!`
-        : `${offer.number} was accepted and escrow funds ($${invoiceAmount.toLocaleString()}) were released to the seller. Order completed!`;
+        ? `${offer.number} ($${invoiceAmount.toLocaleString()}) was paid (+$${additionalAmount.toLocaleString()} funded from wallet) and full escrow ($${invoiceAmount.toLocaleString()}) was released to the seller. ${completionSuffix}`
+        : `${offer.number} was accepted and escrow funds ($${invoiceAmount.toLocaleString()}) were released to the seller. ${completionSuffix}`;
       await postOfferMessage(order, offer, null, completionNote, 'offer_paid', client);
     });
 
@@ -1585,7 +1599,14 @@ async function executeWorkspaceInquiryOfferAccept(
     ...(projectOrderId ? { projectOrderId } : {}),
     ...(gigId ? { gigId } : {}),
     ...(projectId ? { projectId } : {}),
-    title: offer.title || (workspace as any).title || 'Custom Offer',
+    title: offer.title || (workspace as any).title || 'Custom Order',
+    metadata: {
+      isInquiry: true,
+      isCustomOrder: true,
+      customOrderFromInquiry: true,
+      inquiryWorkspaceId: workspace.workspaceId,
+      ...((workspace as any).metadata || {})
+    },
     buyerId: workspace.buyerId,
     sellerId: workspace.sellerId,
     amount: offerAmount,
@@ -1658,8 +1679,8 @@ async function executeWorkspaceInquiryOfferAccept(
       await emitSystemEvent(
         enrichedOrder.id,
         'order_created',
-        `Order placed: ${enrichedOrder.title}. Payment is held in escrow until the work is approved.`,
-        { workspaceId: workspace.workspaceId },
+        `Custom Order placed: ${enrichedOrder.title}. Payment is held in escrow until the work is approved.`,
+        { workspaceId: workspace.workspaceId, isCustomOrder: true },
         client
       );
 
@@ -1674,27 +1695,26 @@ async function executeWorkspaceInquiryOfferAccept(
         ...(offer.metadata || {}),
         originOrderId: enrichedOrder.id,
         resultingOrderId: enrichedOrder.id,
-        workspaceId: workspace.workspaceId
+        workspaceId: workspace.workspaceId,
+        isCustomOrder: true
       };
       await saveOfferToDb(offer, client);
 
-      if (orderType === 'project') {
-        await createNotification({
-          userId: enrichedOrder.sellerId,
-          type: 'proposal_accepted',
-          title: 'Proposal accepted',
-          message: `Your proposal "${offer.title}" was accepted and escrow has been funded.`,
-          link: `/workstream/${enrichedOrder.id}`,
-          metadata: { orderId: enrichedOrder.id, workspaceId: workspace.workspaceId, offerId: offer.id },
-          client
-        }, client);
-      }
+      await createNotification({
+        userId: enrichedOrder.sellerId,
+        type: 'proposal_accepted',
+        title: 'Custom Order Proposal accepted',
+        message: `Your Custom Order Proposal "${offer.title}" was accepted and escrow has been funded. Custom Order #${enrichedOrder.id} created.`,
+        link: `/workstream/${enrichedOrder.id}`,
+        metadata: { orderId: enrichedOrder.id, workspaceId: workspace.workspaceId, offerId: offer.id, isCustomOrder: true },
+        client
+      }, client);
 
       await postOfferMessage(
         enrichedOrder,
         offer,
         null,
-        `${offer.number || 'Proposal'} was accepted and escrow was funded ($${offerAmount}).`,
+        `Custom Order Proposal ${offer.number || 'Proposal'} was accepted and escrow was funded ($${offerAmount}). Custom Order #${enrichedOrder.id} created.`,
         'offer_accepted',
         client
       );
@@ -1800,17 +1820,15 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
         offer.resolvedAt = now;
         offer.resolvedBy = caller.id;
         await saveOfferToDb(offer);
-        await postOfferMessage(workspace as any, offer, null, `${offer.number} was cancelled by the seller.`, 'offer_cancelled');
-        if (isProjectInquiry) {
-          createNotification({
-            userId: workspace.buyerId,
-            type: 'proposal_cancelled',
-            title: `${OFFER_LABEL[offer.kind]} cancelled`,
-            message: `The ${offer.kind} for "${(workspace as any).title || offer.title}" was cancelled by the seller.`,
-            link: `/workstream/${workspace.workspaceId}`,
-            metadata: { workspaceId: workspace.workspaceId, offerId: offer.id }
-          });
-        }
+        await postOfferMessage(workspace as any, offer, null, `Custom Order Proposal ${offer.number} was cancelled by the seller.`, 'offer_cancelled');
+        createNotification({
+          userId: workspace.buyerId,
+          type: 'proposal_cancelled',
+          title: 'Custom Order Proposal cancelled',
+          message: `The Custom Order Proposal for "${(workspace as any).title || offer.title}" was cancelled by the seller.`,
+          link: `/workstream/${workspace.workspaceId}`,
+          metadata: { workspaceId: workspace.workspaceId, offerId: offer.id, isCustomOrder: true }
+        });
         return res.json({ offer: await viewOffer(offer), order: null });
       }
 
@@ -1833,19 +1851,17 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
           workspace as any,
           offer,
           null,
-          `${offer.number} was declined by the buyer.${offer.rejectionReason ? ` Reason: ${offer.rejectionReason}` : ''}`,
+          `Custom Order Proposal ${offer.number} was declined by the buyer.${offer.rejectionReason ? ` Reason: ${offer.rejectionReason}` : ''}`,
           'offer_declined'
         );
-        if (isProjectInquiry) {
-          createNotification({
-            userId: workspace.sellerId,
-            type: 'proposal_declined',
-            title: 'Proposal declined',
-            message: `Your proposal "${offer.title}" was declined by the buyer.`,
-            link: `/workstream/${workspace.workspaceId}`,
-            metadata: { workspaceId: workspace.workspaceId, offerId: offer.id }
-          });
-        }
+        createNotification({
+          userId: workspace.sellerId,
+          type: 'proposal_declined',
+          title: 'Custom Order Proposal declined',
+          message: `Your Custom Order Proposal for "${(workspace as any).title || offer.title}" was declined by the buyer.`,
+          link: `/workstream/${workspace.workspaceId}`,
+          metadata: { workspaceId: workspace.workspaceId, offerId: offer.id, isCustomOrder: true }
+        });
         return res.json({ offer: await viewOffer(offer), order: null });
       }
 

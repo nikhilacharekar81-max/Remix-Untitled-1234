@@ -487,10 +487,12 @@ export function enrichOrderWithServiceInfo(o: Order, isAdmin: boolean = false) {
       }
     }
   }
+  const isCustomOrder = Boolean(o.metadata?.isInquiry || (o as any).metadata?.isCustomOrder || (o as any).metadata?.customOrderFromInquiry);
   const base = {
     ...o,
     orderType: resolvedType,
     type: resolvedType,
+    ...(isCustomOrder ? { isCustomOrder: true, isInquiry: true } : {}),
     gigOrderId: o.gigOrderId || (resolvedType === 'gig' ? o.id : undefined),
     projectOrderId: o.projectOrderId || (resolvedType === 'project' ? o.id : undefined),
     ...(reviewWindowDays !== undefined ? { reviewWindowDays } : {}),
