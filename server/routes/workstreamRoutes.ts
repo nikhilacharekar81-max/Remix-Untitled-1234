@@ -1202,6 +1202,56 @@ async function executeUnifiedOfferAccept(
   const isCancelledOrRefundedFollowOn = order.status === 'cancelled' || (order.status as string) === 'refunded';
 
   if (offer.kind === 'invoice') {
+    const workableInvoiceStatuses = [
+      'funded_in_escrow',
+      'in_progress',
+      'accepted',
+      'revision',
+      'draft_review',
+      'work_in_progress',
+      'late',
+      'delivered'
+    ];
+    if (
+      offer.status === 'pending' &&
+      offer.createdBy === order.sellerId &&
+      workableInvoiceStatuses.includes(order.status)
+    ) {
+      if (!Array.isArray(order.deliverableFiles)) order.deliverableFiles = [];
+      if (!Array.isArray(order.deliveryHistory)) order.deliveryHistory = [];
+      const hasOfferDeliveryEntry = order.deliveryHistory.some((d: any) => d?.offerId === offer.id);
+      if (!hasOfferDeliveryEntry) {
+        const offerFiles = Array.isArray(offer.files) ? offer.files : [];
+        if (offerFiles.length > 0) {
+          const existingFileIds = new Set(order.deliverableFiles.map((f: any) => f?.id || f?.url));
+          for (const f of offerFiles) {
+            if (!existingFileIds.has(f?.id || f?.url)) {
+              order.deliverableFiles.push(f as any);
+            }
+          }
+        }
+        const maxExistingVersion = order.deliveryHistory.reduce(
+          (max: number, entry: any) => Math.max(max, Number(entry?.version) || 0),
+          0
+        );
+        const version = Math.max(order.deliveryHistory.length, maxExistingVersion) + 1;
+        const sanitizedNotes = offer.note ? escapeHtml(offer.note) : escapeHtml(offer.title || 'Invoice delivery');
+        order.deliveryNotes = sanitizedNotes;
+        if (offer.reference) order.deliveryReference = offer.reference;
+        const deliveredAt = offer.createdAt || now;
+        order.deliveryHistory.push({
+          version,
+          notes: sanitizedNotes,
+          reference: offer.reference || undefined,
+          files: offerFiles,
+          deliveredAt,
+          offerId: offer.id,
+          ...(offer.responseDeadline ? { responseDeadline: offer.responseDeadline } : {})
+        } as any);
+      }
+      order.status = 'delivered';
+    }
+
     const validationError = validateOrderReleasePreconditions(order, false, true);
     if (validationError) {
       return { status: validationError.status, body: { error: validationError.error } };
