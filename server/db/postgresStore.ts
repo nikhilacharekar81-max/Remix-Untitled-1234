@@ -604,12 +604,19 @@ export class PostgresStore {
   }
 
   async seedEscrow(orderId: string, orderTitle: string, buyerId: string, sellerId: string, amount: number, remaining: number, fundedAt: string): Promise<void> {
-    await this.getPool().query(
+    const res = await this.getPool().query(
       `INSERT INTO escrows (order_id, order_title, buyer_id, seller_id, amount, remaining, status, funded_at)
        VALUES ($1, $2, $3, $4, $5, $6, 'held', $7)
-       ON CONFLICT (order_id) DO NOTHING`,
+       ON CONFLICT (order_id) DO NOTHING
+       RETURNING order_id`,
       [orderId, orderTitle, buyerId, sellerId, amount, remaining, fundedAt]
     );
+    if (res.rows.length > 0 && remaining > 0) {
+      await this.getPool().query(
+        `UPDATE wallets SET funds_on_hold = funds_on_hold + $1 WHERE user_id = $2`,
+        [remaining, buyerId]
+      );
+    }
   }
 
   async listUnclearedEarningsForUser(sellerId: string, client?: any): Promise<ClearingEarning[]> {

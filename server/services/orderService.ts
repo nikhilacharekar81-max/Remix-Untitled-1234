@@ -137,6 +137,19 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
           WHERE u.id = ec.user_id
             AND u.earned IS DISTINCT FROM ec.total_earned
         `, [distinctIds]);
+        await dbRunner.query(`
+          UPDATE wallets w
+          SET funds_on_hold = GREATEST(0, COALESCE(e.escrow_hold, 0))
+          FROM (
+            SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0) AS escrow_hold
+            FROM wallets w2
+            LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
+            WHERE w2.user_id = ANY($1::text[])
+            GROUP BY w2.user_id
+          ) e
+          WHERE w.user_id = e.user_id
+            AND w.funds_on_hold IS DISTINCT FROM e.escrow_hold
+        `, [distinctIds]);
       }
     } else {
       await dbRunner.query(`
@@ -157,6 +170,18 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
         ) ec
         WHERE u.id = ec.user_id
           AND u.earned IS DISTINCT FROM ec.total_earned
+      `);
+      await dbRunner.query(`
+        UPDATE wallets w
+        SET funds_on_hold = GREATEST(0, COALESCE(e.escrow_hold, 0))
+        FROM (
+          SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0) AS escrow_hold
+          FROM wallets w2
+          LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
+          GROUP BY w2.user_id
+        ) e
+        WHERE w.user_id = e.user_id
+          AND w.funds_on_hold IS DISTINCT FROM e.escrow_hold
       `);
     }
     if (useSavepoint) {

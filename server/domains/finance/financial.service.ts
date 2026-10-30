@@ -807,7 +807,7 @@ export class FinancialTransactionService {
         const initBal = Number(params.initialBalance || 0);
         await client.query(
           `INSERT INTO wallets (user_id, user_name, user_email, user_role, available_balance, funds_on_hold, pending_withdrawals, status)
-           VALUES ($1, $2, $3, $4, $5, 0.00, 0.00, 'active')`,
+           VALUES ($1, $2, $3, $4, $5, COALESCE((SELECT SUM(remaining) FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split')), 0.00), 0.00, 'active')`,
           [params.userId, resolvedName || `User ${params.userId}`, resolvedEmail || `${params.userId}@example.com`, resolvedRole, initBal]
         );
         if (initBal > 0) {
@@ -1129,7 +1129,7 @@ export class FinancialTransactionService {
       );
 
       // Update Wallets (Buyer Hold reduced)
-      await client.query('UPDATE wallets SET funds_on_hold = funds_on_hold - $1 WHERE user_id = $2', [gross, escrow.buyer_id]);
+      await client.query('UPDATE wallets SET funds_on_hold = GREATEST(0, funds_on_hold - $1) WHERE user_id = $2', [gross, escrow.buyer_id]);
       
       // Update Order
       await client.query('UPDATE orders SET status = $1, completed_at = COALESCE(completed_at, NOW()::text) WHERE id = $2 AND status NOT IN (\'completed\', \'cancelled\')', ['completed', params.orderId]);
@@ -1279,7 +1279,7 @@ export class FinancialTransactionService {
       );
 
       // Update Wallets (Buyer Hold -> Buyer Available)
-      await client.query('UPDATE wallets SET funds_on_hold = funds_on_hold - $1, available_balance = available_balance + $2 WHERE user_id = $3', [refundAmount, totalRefundToBuyer, escrow.buyer_id]);
+      await client.query('UPDATE wallets SET funds_on_hold = GREATEST(0, funds_on_hold - $1), available_balance = available_balance + $2 WHERE user_id = $3', [refundAmount, totalRefundToBuyer, escrow.buyer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [escrow.buyer_id]);
 
       await client.query(
@@ -1986,7 +1986,7 @@ export class FinancialTransactionService {
       await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
 
       const amount = Number(payout.amount);
-      await client.query('UPDATE wallets SET pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
+      await client.query('UPDATE wallets SET pending_withdrawals = GREATEST(0, pending_withdrawals - $1) WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query("UPDATE payouts SET status = 'processed', processed_at = NOW(), updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
       const journalId = 'jnl_' + randomUUID().slice(0, 12);
@@ -2032,7 +2032,7 @@ export class FinancialTransactionService {
 
       await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
       const amount = Number(payout.amount);
-      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
+      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = GREATEST(0, pending_withdrawals - $1) WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
       await client.query("UPDATE payouts SET status = 'cancelled', updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
@@ -2092,7 +2092,7 @@ export class FinancialTransactionService {
 
       await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
       const amount = Number(payout.amount);
-      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
+      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = GREATEST(0, pending_withdrawals - $1) WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
       await client.query("UPDATE payouts SET status = 'failed', updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
