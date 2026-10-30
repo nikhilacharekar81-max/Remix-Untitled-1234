@@ -504,6 +504,8 @@ export interface Message {
     oldDate?: string;
     newDueDate?: string;
     files?: any;
+    reviewId?: string;
+    reviewerId?: string;
     reviewerRole?: string;
     disputeId?: string;
     raisedBy?: string;

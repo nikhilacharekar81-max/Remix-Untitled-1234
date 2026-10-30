@@ -74,6 +74,7 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
       setMessages(prev => {
         const byId = new Map<string, Message>();
         for (const m of prev) {
+          if (String(m?.id || '').startsWith('msg_review_')) continue;
           const key = m?.metadata?.clientMessageId || m?.id;
           if (key) {
             byId.set(key, m);

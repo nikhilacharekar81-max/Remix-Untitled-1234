@@ -227,6 +227,9 @@ export const handleSubmitReview = async (req: Request, res: Response) => {
       type: 'system',
       metadata: {
         action: 'review_submitted',
+        reviewId: newReview.id,
+        reviewerId: caller.id,
+        reviewerRole: isBuyerReviewer ? 'buyer' : 'seller',
         rating: newReview.rating,
         comment: newReview.comment,
         isCancelledOrder: false
@@ -235,7 +238,7 @@ export const handleSubmitReview = async (req: Request, res: Response) => {
     await recordMessage(sysMsg);
     broadcastMessage(sysMsg, order.id);
 
-    res.status(201).json({ success: true, review: newReview, order: enrichOrderWithServiceInfo(order) });
+    res.status(201).json({ success: true, review: newReview, order: enrichOrderWithServiceInfo(order), message: sysMsg });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to submit review' });
   }

@@ -118,27 +118,22 @@ export function useWorkstreamReview({
         await refresh();
       }
 
-      // Add local review system message if setMessages provided
-      if (setMessages) {
-        const sysMsg: Message = {
-          id: `msg_review_${Date.now()}`,
-          orderId: selectedOrder.id,
-          senderId: 'system',
-          senderName: 'WorkSphere Reviews',
-          text: `⭐ Review submitted (${createdReview.rating}/5 stars): "${createdReview.comment}"`,
-          timestamp: new Date().toISOString(),
-          type: 'system',
-          metadata: {
-            action: 'review_submitted',
-            rating: createdReview.rating,
-            comment: createdReview.comment
-          }
-        };
+      // Sync authoritative server review message without fabricating a duplicate client-side message
+      if (setMessages && data.message) {
+        const serverMsg: Message = data.message;
         setMessages(prev => {
-          if (prev.some(m => m.orderId === selectedOrder.id && m.metadata?.action === 'review_submitted')) {
-            return prev;
-          }
-          return [...prev, sysMsg];
+          const filtered = prev.filter(
+            m =>
+              !(
+                m.orderId === selectedOrder.id &&
+                m.metadata?.action === 'review_submitted' &&
+                (m.id === serverMsg.id ||
+                  String(m.id || '').startsWith('msg_review_') ||
+                  (m.metadata?.reviewId && m.metadata.reviewId === serverMsg.metadata?.reviewId) ||
+                  (m.metadata?.reviewerId && m.metadata.reviewerId === serverMsg.metadata?.reviewerId))
+              )
+          );
+          return [...filtered, serverMsg];
         });
       }
 

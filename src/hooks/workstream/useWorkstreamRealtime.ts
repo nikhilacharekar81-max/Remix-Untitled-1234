@@ -80,13 +80,30 @@ export function useWorkstreamRealtime({
             }
             setMessages(prev => {
               // One-per-order lifecycle events may already exist locally under a different (client-made) id.
-              const singletonAction = incomingMsg.type === 'system' && ['escrow_released', 'review_submitted', 'review_reply_submitted', 'order_auto_accepted', 'order_completed', 'deliverable_approved'].includes(incomingMsg.metadata?.action)
+              const singletonAction = incomingMsg.type === 'system' && ['escrow_released', 'review_reply_submitted', 'order_auto_accepted', 'order_completed', 'deliverable_approved'].includes(incomingMsg.metadata?.action)
                 ? incomingMsg.metadata.action : null;
+              const isIncomingReview = incomingMsg.type === 'system' && incomingMsg.metadata?.action === 'review_submitted';
               const clientMsgId = incomingMsg.metadata?.clientMessageId;
-              const isSame = (m: any) =>
-                m.id === incomingMsg.id ||
-                (clientMsgId && m.metadata?.clientMessageId === clientMsgId) ||
-                (singletonAction && m.type === 'system' && m.orderId === incomingMsg.orderId && m.metadata?.action === incomingMsg.metadata?.action);
+              const isSame = (m: any) => {
+                if (m.id === incomingMsg.id) return true;
+                if (clientMsgId && m.metadata?.clientMessageId === clientMsgId) return true;
+                if (singletonAction && m.type === 'system' && m.orderId === incomingMsg.orderId && m.metadata?.action === incomingMsg.metadata?.action) {
+                  return true;
+                }
+                if (isIncomingReview && m.type === 'system' && m.orderId === incomingMsg.orderId && m.metadata?.action === 'review_submitted') {
+                  if (incomingMsg.metadata?.reviewId && m.metadata?.reviewId) {
+                    return m.metadata.reviewId === incomingMsg.metadata.reviewId;
+                  }
+                  if (incomingMsg.metadata?.reviewerId && m.metadata?.reviewerId) {
+                    return m.metadata.reviewerId === incomingMsg.metadata.reviewerId;
+                  }
+                  if (String(m.id || '').startsWith('msg_review_')) {
+                    return Number(m.metadata?.rating) === Number(incomingMsg.metadata?.rating) &&
+                      String(m.metadata?.comment || '').trim() === String(incomingMsg.metadata?.comment || '').trim();
+                  }
+                }
+                return false;
+              };
               const alreadyExists = prev.some(isSame);
               if (alreadyExists) {
                 // If it exists but was optimistic, update it with full server data

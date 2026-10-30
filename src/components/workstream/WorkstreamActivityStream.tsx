@@ -124,17 +124,66 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
     }
   };
 
+  /** Deduplicate review_submitted messages (e.g. legacy client-fabricated msg_review_* duplicates) */
+  const dedupedMessages = useMemo(() => {
+    const isReviewMsg = (m: WorkstreamMessage) =>
+      m.type === 'system' &&
+      (m.metadata?.action === 'review_submitted' ||
+        String(m.id || '').startsWith('msg_review_') ||
+        /review submitted/i.test(String(m.text || '')));
+
+    const authoritativeReviews = messages.filter(
+      m => isReviewMsg(m) && !String(m.id || '').startsWith('msg_review_') && /review submitted by\s+/i.test(String(m.text || ''))
+    );
+
+    const seenKeys = new Set<string>();
+    return messages.filter(m => {
+      if (!isReviewMsg(m)) return true;
+
+      const isClientFabricated =
+        String(m.id || '').startsWith('msg_review_') ||
+        !/review submitted by\s+/i.test(String(m.text || ''));
+
+      const mComment = String(m.metadata?.comment || '').trim().toLowerCase();
+      const mRating = Number(m.metadata?.rating || 0);
+      const mReviewId = m.metadata?.reviewId ? String(m.metadata.reviewId) : '';
+      const mReviewerId = m.metadata?.reviewerId ? String(m.metadata.reviewerId) : '';
+
+      // If this is a legacy client-fabricated message and an authoritative server message exists for the same review, drop it
+      if (isClientFabricated && authoritativeReviews.some(auth => {
+        if (auth.id === m.id) return false;
+        const authComment = String(auth.metadata?.comment || '').trim().toLowerCase();
+        const authRating = Number(auth.metadata?.rating || 0);
+        if (mReviewId && auth.metadata?.reviewId && String(auth.metadata.reviewId) === mReviewId) return true;
+        if (mReviewerId && auth.metadata?.reviewerId && String(auth.metadata.reviewerId) === mReviewerId) return true;
+        return authRating === mRating && authComment === mComment;
+      })) {
+        return false;
+      }
+
+      const dedupeKey = mReviewId
+        ? `id:${mReviewId}`
+        : mReviewerId
+          ? `reviewer:${mReviewerId}:${mRating}:${mComment}`
+          : `text:${String(m.text || '').trim().toLowerCase()}:${mRating}:${mComment}`;
+
+      if (seenKeys.has(dedupeKey)) return false;
+      seenKeys.add(dedupeKey);
+      return true;
+    });
+  }, [messages]);
+
   /** Filter counts */
   const counts = useMemo(() => {
     const res = {
-      all: messages.length,
+      all: dedupedMessages.length,
       deliveries: 0,
       financial: 0,
       proposals_orders: 0,
       system_audit: 0,
       chat_only: 0
     };
-    for (const m of messages) {
+    for (const m of dedupedMessages) {
       if (matchesActivityFilter(m, 'deliveries')) res.deliveries++;
       if (matchesActivityFilter(m, 'financial')) res.financial++;
       if (matchesActivityFilter(m, 'proposals_orders')) res.proposals_orders++;
@@ -142,11 +191,11 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
       if (matchesActivityFilter(m, 'chat_only')) res.chat_only++;
     }
     return res;
-  }, [messages]);
+  }, [dedupedMessages]);
 
   const filteredMessages = useMemo(() => {
-    return messages.filter(m => matchesActivityFilter(m, activeFilter));
-  }, [messages, activeFilter]);
+    return dedupedMessages.filter(m => matchesActivityFilter(m, activeFilter));
+  }, [dedupedMessages, activeFilter]);
 
   /** Maps icon names to Lucide icons */
   const renderIcon = (iconName: string) => {
