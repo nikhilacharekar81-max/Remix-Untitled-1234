@@ -568,7 +568,20 @@ export async function processCancellationTimeouts() {
             const requesterId = cancelReq.requesterId;
             const otherId = requesterId === freshOrder.buyerId ? freshOrder.sellerId : freshOrder.buyerId;
 
-            if (freshOrder.amount === 0 || /^inquiry:/i.test(freshOrder.title)) {
+            const orderMeta = typeof (freshRow as any).metadata === 'string'
+              ? (() => { try { return JSON.parse((freshRow as any).metadata); } catch { return {}; } })()
+              : ((freshRow as any).metadata || (freshOrder as any).metadata || {});
+            const isCustomOrder = Boolean((freshOrder as any).isCustomOrder || orderMeta.isCustomOrder || orderMeta.customOrderFromInquiry);
+            const escRow = await financialRepository.getEscrow(freshOrder.id, client);
+            const hasEscrowRecord = Boolean(escRow && (Number(escRow.remaining || 0) > 0 || escRow.status === 'held' || Number(escRow.amount || 0) > 0));
+
+            const isAuthoritativeInquiryOnly = Boolean(
+              ((freshOrder as any).isInquiry === true || orderMeta.isInquiry === true) &&
+              !isCustomOrder &&
+              !hasEscrowRecord
+            );
+
+            if (isAuthoritativeInquiryOnly) {
               freshOrder.status = 'cancelled';
               cancelReq.status = 'auto_cancelled';
               freshOrder.cancellationRequest = cancelReq;
