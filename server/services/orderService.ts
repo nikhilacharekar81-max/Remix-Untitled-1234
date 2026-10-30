@@ -116,6 +116,11 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
     if (hasSpecificUsers) {
       const distinctIds = Array.from(new Set(userIds.filter(Boolean))).sort();
       if (distinctIds.length > 0) {
+        // Consistent Lock Order: 1. Lock Wallets sorted by user_id
+        await dbRunner.query(`SELECT user_id FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE`, [distinctIds]);
+        // 2. Lock Active Escrows sorted by order_id
+        await dbRunner.query(`SELECT order_id FROM escrows WHERE buyer_id = ANY($1::text[]) AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`, [distinctIds]);
+
         await dbRunner.query(`
           UPDATE users u
           SET wallet_balance = w.available_balance
@@ -124,6 +129,7 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
             AND u.id = ANY($1::text[])
             AND u.wallet_balance IS DISTINCT FROM w.available_balance
         `, [distinctIds]);
+
         await dbRunner.query(`
           UPDATE users u
           SET earned = COALESCE(ec.total_earned, 0)
@@ -137,21 +143,27 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
           WHERE u.id = ec.user_id
             AND u.earned IS DISTINCT FROM ec.total_earned
         `, [distinctIds]);
+
         await dbRunner.query(`
           UPDATE wallets w
-          SET funds_on_hold = GREATEST(0, COALESCE(e.escrow_hold, 0))
+          SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
           FROM (
-            SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0) AS escrow_hold
+            SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
             FROM wallets w2
             LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
             WHERE w2.user_id = ANY($1::text[])
             GROUP BY w2.user_id
           ) e
           WHERE w.user_id = e.user_id
-            AND w.funds_on_hold IS DISTINCT FROM e.escrow_hold
+            AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
         `, [distinctIds]);
       }
     } else {
+      // Consistent Lock Order: 1. Lock all Wallets sorted by user_id
+      await dbRunner.query(`SELECT user_id FROM wallets ORDER BY user_id ASC FOR UPDATE`);
+      // 2. Lock all Active Escrows sorted by order_id
+      await dbRunner.query(`SELECT order_id FROM escrows WHERE status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`);
+
       await dbRunner.query(`
         UPDATE users u
         SET wallet_balance = w.available_balance
@@ -159,6 +171,7 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
         WHERE u.id = w.user_id
           AND u.wallet_balance IS DISTINCT FROM w.available_balance
       `);
+
       await dbRunner.query(`
         UPDATE users u
         SET earned = COALESCE(ec.total_earned, 0)
@@ -171,17 +184,18 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
         WHERE u.id = ec.user_id
           AND u.earned IS DISTINCT FROM ec.total_earned
       `);
+
       await dbRunner.query(`
         UPDATE wallets w
-        SET funds_on_hold = GREATEST(0, COALESCE(e.escrow_hold, 0))
+        SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
         FROM (
-          SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0) AS escrow_hold
+          SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
           FROM wallets w2
           LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
           GROUP BY w2.user_id
         ) e
         WHERE w.user_id = e.user_id
-          AND w.funds_on_hold IS DISTINCT FROM e.escrow_hold
+          AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
       `);
     }
     if (useSavepoint) {
@@ -192,6 +206,7 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
       try { await dbRunner.query(`ROLLBACK TO SAVEPOINT ${spName}`); } catch {}
     }
     console.error('[syncUserBalances] Error syncing balances:', err);
+    throw err;
   }
 }
 

@@ -604,19 +604,41 @@ export class PostgresStore {
   }
 
   async seedEscrow(orderId: string, orderTitle: string, buyerId: string, sellerId: string, amount: number, remaining: number, fundedAt: string): Promise<void> {
-    const res = await this.getPool().query(
-      `INSERT INTO escrows (order_id, order_title, buyer_id, seller_id, amount, remaining, status, funded_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'held', $7)
-       ON CONFLICT (order_id) DO NOTHING
-       RETURNING order_id`,
-      [orderId, orderTitle, buyerId, sellerId, amount, remaining, fundedAt]
-    );
-    if (res.rows.length > 0 && remaining > 0) {
-      await this.getPool().query(
-        `UPDATE wallets SET funds_on_hold = funds_on_hold + $1 WHERE user_id = $2`,
-        [remaining, buyerId]
+    await this.executeInTransaction(async (client) => {
+      // 1. Ensure buyer wallet row exists
+      await client.query(
+        `INSERT INTO wallets (user_id, user_name, user_email, user_role, available_balance, funds_on_hold, pending_withdrawals, status)
+         VALUES ($1, $1, $1 || '@example.com', 'buyer', 0.00, 0.00, 0.00, 'active')
+         ON CONFLICT (user_id) DO NOTHING`,
+        [buyerId]
       );
-    }
+
+      // 2. Lock buyer wallet row
+      const walletLockRes = await client.query('SELECT user_id FROM wallets WHERE user_id = $1 FOR UPDATE', [buyerId]);
+      if (walletLockRes.rows.length === 0) {
+        throw new Error(`Failed to lock buyer wallet for seedEscrow: ${buyerId}`);
+      }
+
+      // 3. Insert escrow with RETURNING order_id
+      const res = await client.query(
+        `INSERT INTO escrows (order_id, order_title, buyer_id, seller_id, amount, remaining, status, funded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'held', $7)
+         ON CONFLICT (order_id) DO NOTHING
+         RETURNING order_id`,
+        [orderId, orderTitle, buyerId, sellerId, amount, remaining, fundedAt]
+      );
+
+      // 4. Update buyer wallet hold only if a new escrow row was inserted and remaining > 0
+      if (res.rows.length > 0 && remaining > 0) {
+        const updateRes = await client.query(
+          `UPDATE wallets SET funds_on_hold = funds_on_hold + $1 WHERE user_id = $2`,
+          [remaining, buyerId]
+        );
+        if (updateRes.rowCount !== 1) {
+          throw new Error(`seedEscrow wallet update failed for buyer ${buyerId}`);
+        }
+      }
+    });
   }
 
   async listUnclearedEarningsForUser(sellerId: string, client?: any): Promise<ClearingEarning[]> {

@@ -1094,6 +1094,11 @@ export class FinancialTransactionService {
       await this.ensureWallet({ userId: escrow.buyer_id, role: 'buyer' }, client);
       await this.ensureWallet({ userId: escrow.seller_id, role: 'freelancer' }, client);
 
+      // Consistent Lock Order: Lock buyer & seller wallets in sorted order by user_id
+      const walletUserIds = Array.from(new Set([escrow.buyer_id, escrow.seller_id])).sort();
+      const lockedWalletsRes = await client.query('SELECT * FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE', [walletUserIds]);
+      const buyerWallet = lockedWalletsRes.rows.find((w: any) => w.user_id === escrow.buyer_id);
+
       if (escrow.status === 'released') {
         const prevIdemp = await client.query(
           "SELECT result FROM financial_idempotency WHERE operation = 'releaseOrderFunds' AND request_fingerprint->>'orderId' = $1 AND status = 'completed' ORDER BY updated_at DESC LIMIT 1",
@@ -1112,6 +1117,22 @@ export class FinancialTransactionService {
       const gross = Number(escrow.remaining);
       assertValidMoneyAmount(gross, 'escrow remaining balance');
 
+      // Verify buyer wallet hold invariant and reconcile safely under lock if needed
+      let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
+      if (buyerHold < gross) {
+        const escSumRes = await client.query(
+          "SELECT COALESCE(SUM(remaining), 0.00) AS total_remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') FOR UPDATE",
+          [escrow.buyer_id]
+        );
+        const reconciledHold = Number(escSumRes.rows[0]?.total_remaining || 0);
+        if (reconciledHold >= gross) {
+          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [reconciledHold, escrow.buyer_id]);
+          buyerHold = reconciledHold;
+        } else {
+          throw new Error(`Cannot release escrow for order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is insufficient for release ($${gross.toFixed(2)}).`);
+        }
+      }
+
       const rawComm = escrow.commission_percent !== null && escrow.commission_percent !== undefined
         ? Number(escrow.commission_percent)
         : 20;
@@ -1129,7 +1150,7 @@ export class FinancialTransactionService {
       );
 
       // Update Wallets (Buyer Hold reduced)
-      await client.query('UPDATE wallets SET funds_on_hold = GREATEST(0, funds_on_hold - $1) WHERE user_id = $2', [gross, escrow.buyer_id]);
+      await client.query('UPDATE wallets SET funds_on_hold = funds_on_hold - $1 WHERE user_id = $2', [gross, escrow.buyer_id]);
       
       // Update Order
       await client.query('UPDATE orders SET status = $1, completed_at = COALESCE(completed_at, NOW()::text) WHERE id = $2 AND status NOT IN (\'completed\', \'cancelled\')', ['completed', params.orderId]);
@@ -1242,6 +1263,11 @@ export class FinancialTransactionService {
       await this.ensureWallet({ userId: escrow.buyer_id, role: 'buyer' }, client);
       await this.ensureWallet({ userId: escrow.seller_id, role: 'freelancer' }, client);
 
+      // Consistent Lock Order: Lock buyer & seller wallets in sorted order by user_id
+      const walletUserIds = Array.from(new Set([escrow.buyer_id, escrow.seller_id])).sort();
+      const lockedWalletsRes = await client.query('SELECT * FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE', [walletUserIds]);
+      const buyerWallet = lockedWalletsRes.rows.find((w: any) => w.user_id === escrow.buyer_id);
+
       if (escrow.status === 'refunded') {
         const prevIdemp = await client.query(
           "SELECT result FROM financial_idempotency WHERE operation = 'refundOrderFunds' AND request_fingerprint->>'orderId' = $1 AND status = 'completed' ORDER BY updated_at DESC LIMIT 1",
@@ -1262,6 +1288,22 @@ export class FinancialTransactionService {
         throw new Error(`Refund amount ($${refundAmount}) exceeds available escrow remaining ($${availableToRefund}).`);
       }
 
+      // Verify buyer wallet hold invariant and reconcile safely under lock if needed
+      let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
+      if (buyerHold < refundAmount) {
+        const escSumRes = await client.query(
+          "SELECT COALESCE(SUM(remaining), 0.00) AS total_remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') FOR UPDATE",
+          [escrow.buyer_id]
+        );
+        const reconciledHold = Number(escSumRes.rows[0]?.total_remaining || 0);
+        if (reconciledHold >= refundAmount) {
+          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [reconciledHold, escrow.buyer_id]);
+          buyerHold = reconciledHold;
+        } else {
+          throw new Error(`Cannot refund order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is insufficient for refund ($${refundAmount.toFixed(2)}).`);
+        }
+      }
+
       const completesFullRefund = (refundAmount === availableToRefund && Number(escrow.released_gross || 0) === 0);
       const servFee = Number(escrow.service_fee || 0);
       const smFee = Number(escrow.small_order_fee || 0);
@@ -1279,7 +1321,7 @@ export class FinancialTransactionService {
       );
 
       // Update Wallets (Buyer Hold -> Buyer Available)
-      await client.query('UPDATE wallets SET funds_on_hold = GREATEST(0, funds_on_hold - $1), available_balance = available_balance + $2 WHERE user_id = $3', [refundAmount, totalRefundToBuyer, escrow.buyer_id]);
+      await client.query('UPDATE wallets SET funds_on_hold = funds_on_hold - $1, available_balance = available_balance + $2 WHERE user_id = $3', [refundAmount, totalRefundToBuyer, escrow.buyer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [escrow.buyer_id]);
 
       await client.query(
@@ -1983,10 +2025,28 @@ export class FinancialTransactionService {
         throw new Error('Payout method changed concurrently during settlement verification.');
       }
 
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
+      const walletLockRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
+      const freelancerWallet = walletLockRes.rows[0];
 
       const amount = Number(payout.amount);
-      await client.query('UPDATE wallets SET pending_withdrawals = GREATEST(0, pending_withdrawals - $1) WHERE user_id = $2', [amount, payout.freelancer_id]);
+      let pendingBal = Number(freelancerWallet?.pending_withdrawals || 0);
+
+      // Verify pending_withdrawals invariant and reconcile safely under lock if needed
+      if (pendingBal < amount) {
+        const payoutsSumRes = await client.query(
+          "SELECT COALESCE(SUM(amount), 0.00) AS total_pending FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') FOR UPDATE",
+          [payout.freelancer_id]
+        );
+        const reconciledPending = Number(payoutsSumRes.rows[0]?.total_pending || 0);
+        if (reconciledPending >= amount) {
+          await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, payout.freelancer_id]);
+          pendingBal = reconciledPending;
+        } else {
+          throw new Error(`Cannot settle payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
+        }
+      }
+
+      await client.query('UPDATE wallets SET pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query("UPDATE payouts SET status = 'processed', processed_at = NOW(), updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
       const journalId = 'jnl_' + randomUUID().slice(0, 12);
@@ -2030,9 +2090,28 @@ export class FinancialTransactionService {
         throw new Error(`Cannot cancel payout in status "${payout.status}".`);
       }
 
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
+      const walletLockRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
+      const freelancerWallet = walletLockRes.rows[0];
+
       const amount = Number(payout.amount);
-      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = GREATEST(0, pending_withdrawals - $1) WHERE user_id = $2', [amount, payout.freelancer_id]);
+      let pendingBal = Number(freelancerWallet?.pending_withdrawals || 0);
+
+      // Verify pending_withdrawals invariant and reconcile safely under lock if needed
+      if (pendingBal < amount) {
+        const payoutsSumRes = await client.query(
+          "SELECT COALESCE(SUM(amount), 0.00) AS total_pending FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') FOR UPDATE",
+          [payout.freelancer_id]
+        );
+        const reconciledPending = Number(payoutsSumRes.rows[0]?.total_pending || 0);
+        if (reconciledPending >= amount) {
+          await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, payout.freelancer_id]);
+          pendingBal = reconciledPending;
+        } else {
+          throw new Error(`Cannot cancel payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
+        }
+      }
+
+      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
       await client.query("UPDATE payouts SET status = 'cancelled', updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
@@ -2090,9 +2169,28 @@ export class FinancialTransactionService {
         throw new Error(`Cannot fail payout in status "${payout.status}".`);
       }
 
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
+      const walletLockRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
+      const freelancerWallet = walletLockRes.rows[0];
+
       const amount = Number(payout.amount);
-      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = GREATEST(0, pending_withdrawals - $1) WHERE user_id = $2', [amount, payout.freelancer_id]);
+      let pendingBal = Number(freelancerWallet?.pending_withdrawals || 0);
+
+      // Verify pending_withdrawals invariant and reconcile safely under lock if needed
+      if (pendingBal < amount) {
+        const payoutsSumRes = await client.query(
+          "SELECT COALESCE(SUM(amount), 0.00) AS total_pending FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') FOR UPDATE",
+          [payout.freelancer_id]
+        );
+        const reconciledPending = Number(payoutsSumRes.rows[0]?.total_pending || 0);
+        if (reconciledPending >= amount) {
+          await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, payout.freelancer_id]);
+          pendingBal = reconciledPending;
+        } else {
+          throw new Error(`Cannot fail payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
+        }
+      }
+
+      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
       await client.query("UPDATE payouts SET status = 'failed', updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
@@ -2492,7 +2590,14 @@ export class FinancialTransactionService {
             const buyerId = escRes.rows[0].buyer_id;
             const holdDiff = re.credit - re.debit;
             if (holdDiff !== 0) {
-              await client.query('UPDATE wallets SET funds_on_hold = GREATEST(0, funds_on_hold + $1) WHERE user_id = $2', [holdDiff, buyerId]);
+              if (holdDiff < 0) {
+                const wRes = await client.query('SELECT funds_on_hold FROM wallets WHERE user_id = $1 FOR UPDATE', [buyerId]);
+                const curHold = Number(wRes.rows[0]?.funds_on_hold || 0);
+                if (curHold + holdDiff < 0) {
+                  throw new Error(`Cannot reverse escrow journal for user ${buyerId}: Wallet hold ($${curHold.toFixed(2)}) is insufficient for hold reversal ($${Math.abs(holdDiff).toFixed(2)}).`);
+                }
+              }
+              await client.query('UPDATE wallets SET funds_on_hold = funds_on_hold + $1 WHERE user_id = $2', [holdDiff, buyerId]);
             }
           }
         }

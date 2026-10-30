@@ -1167,35 +1167,20 @@ BEGIN
   EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_inquiry_unique ON workspaces (buyer_id, seller_id, ((metadata->>''originType'')), ((metadata->>''originId''))) WHERE (metadata->>''isInquiry'') = ''true''';
 END $$;
 
--- Safe Guard & Self-Healing: Clamp wallet fields to prevent any negative funds_on_hold or pending_withdrawals
-CREATE OR REPLACE FUNCTION trg_clamp_wallet_fields()
-RETURNS TRIGGER AS $$
-BEGIN
-  IF NEW.funds_on_hold IS NULL OR NEW.funds_on_hold < 0 THEN
-    NEW.funds_on_hold := 0.00;
-  END IF;
-  IF NEW.pending_withdrawals IS NULL OR NEW.pending_withdrawals < 0 THEN
-    NEW.pending_withdrawals := 0.00;
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
+-- Ensure no clamping trigger exists so check constraints enforce strict invariants
 DROP TRIGGER IF EXISTS trg_clamp_wallet_fields_before ON wallets;
-CREATE TRIGGER trg_clamp_wallet_fields_before
-BEFORE INSERT OR UPDATE ON wallets
-FOR EACH ROW
-EXECUTE FUNCTION trg_clamp_wallet_fields();
+DROP FUNCTION IF EXISTS trg_clamp_wallet_fields();
 
 -- Self-heal any existing wallets where funds_on_hold is out of sync with active escrows
 UPDATE wallets w
-SET funds_on_hold = GREATEST(0, COALESCE(e.escrow_hold, 0))
+SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
 FROM (
-  SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0) AS escrow_hold
+  SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
   FROM wallets w2
   LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
   GROUP BY w2.user_id
 ) e
 WHERE w.user_id = e.user_id
-  AND w.funds_on_hold IS DISTINCT FROM e.escrow_hold;
+  AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00);
+
 
