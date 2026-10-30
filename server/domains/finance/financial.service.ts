@@ -2261,22 +2261,23 @@ export class FinancialTransactionService {
   async retryPayout(params: { payoutId: string; actor: string; idempotencyKey?: string }, externalClient?: any) {
     assertPostgresAvailable();
     const run = async (client: any) => {
-      const targetPayoutCheck = await client.query('SELECT * FROM payouts WHERE id = $1', [params.payoutId]);
+      // Step 1: Resolve freelancer ID without locking target payout row
+      const targetPayoutCheck = await client.query('SELECT freelancer_id FROM payouts WHERE id = $1', [params.payoutId]);
       if (targetPayoutCheck.rows.length === 0) throw new Error('Payout not found');
       const freelancerId = targetPayoutCheck.rows[0].freelancer_id;
 
-      // Lock all active payouts for the freelancer in deterministic order BEFORE locking wallet
-      const activePayoutRows = await client.query(
-        "SELECT * FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE",
-        [freelancerId]
+      // Step 2: Lock active payouts for freelancer AND target payout in deterministic ORDER BY id ASC FOR UPDATE
+      const lockedPayoutsRes = await client.query(
+        "SELECT * FROM payouts WHERE (freelancer_id = $1 AND status IN ('pending', 'approved')) OR id = $2 ORDER BY id ASC FOR UPDATE",
+        [freelancerId, params.payoutId]
       );
 
-      let payout = activePayoutRows.rows.find((r: any) => String(r.id) === String(params.payoutId));
-      if (!payout) {
-        payout = targetPayoutCheck.rows[0];
-        if (payout.status !== 'failed') {
-          throw new Error('Only failed payouts can be retried.');
-        }
+      // Step 3: Re-read target payout from locked rows and validate status under row lock
+      const payout = lockedPayoutsRes.rows.find((r: any) => String(r.id) === String(params.payoutId));
+      if (!payout) throw new Error('Payout not found');
+
+      if (payout.status !== 'failed') {
+        throw new Error('Only failed payouts can be retried.');
       }
 
       if (params.actor && !params.actor.startsWith('admin') && !params.actor.startsWith('system') && params.actor !== freelancerId) {
@@ -2317,6 +2318,7 @@ export class FinancialTransactionService {
       const check = await checkOrRecordIdempotency(client, idempKey, 'retryPayout', payloadFingerprint);
       if (check.replayed) return check.result;
 
+      // Step 4: Lock freelancer wallet
       const wRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
       if (wRes.rows.length === 0) throw new Error('Freelancer wallet not found');
       const wallet = wRes.rows[0];
@@ -2363,9 +2365,18 @@ export class FinancialTransactionService {
         throw new Error('Insufficient wallet balance to retry payout.');
       }
 
+      // Step 5: Atomically transition status from failed to pending in PostgreSQL
+      const updatePayoutRes = await client.query(
+        "UPDATE payouts SET status = 'pending', updated_at = NOW() WHERE id = $1 AND status = 'failed' RETURNING *",
+        [params.payoutId]
+      );
+      if (updatePayoutRes.rows.length === 0) {
+        throw new Error('Only failed payouts can be retried.');
+      }
+
+      // Step 6: Debit wallet balance & sync users.wallet_balance
       await client.query('UPDATE wallets SET available_balance = available_balance - $1, pending_withdrawals = pending_withdrawals + $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
-      await client.query("UPDATE payouts SET status = 'pending', updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
       await client.query(
         'INSERT INTO wallet_movements (id, user_id, amount, type, description) VALUES ($1, $2, $3, $4, $5)',
