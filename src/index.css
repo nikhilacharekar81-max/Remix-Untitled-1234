@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+@variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-heading: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* ... (color variables) ... */
+  --color-emerald-50: #eefbf4;
+  --color-emerald-100: #d5f6e3;
+  --color-emerald-200: #aff0cc;
+  --color-emerald-300: #79e4ae;
+  --color-emerald-400: #3cd18a;
+  --color-emerald-500: #1dbf73;
+  --color-emerald-600: #10a35e;
+  --color-emerald-700: #10814d;
+  --color-emerald-800: #126640;
+  --color-emerald-900: #115436;
+  --color-emerald-950: #082f1d;
+  --color-fiverr-green: #1dbf73;
+  --color-fiverr-dark: #0f172a;
+  --color-fiverr-muted: #64748b;
+  --color-brand-green: #1dbf73;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.5;
+    background-color: #f8fafc;
+    color: #1e293b;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+    font-weight: 700;
+    color: #1e293b;
+  }
+
+  ::selection {
+    background-color: #1dbf73;
+    color: #ffffff;
+  }
+}
+
+/* Custom sleek scrollbar styling for SaaS UI */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+.tabular-nums { font-variant-numeric: tabular-nums; }
+
+@layer utilities {
+  .text-xs {
+    font-size: 0.875rem; /* 14px */
+    line-height: 1.25rem;
+  }
+  .forced-13-17 {
+    font-size: 13px !important;
+    line-height: 17px !important;
+  }
+}

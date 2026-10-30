@@ -1,0 +1,8 @@
+{
+  "name": "Work Per Hour",
+  "description": "A secure freelance marketplace with 100% Escrow payment protection, real-time Workstream collaboration, and AI proposal generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

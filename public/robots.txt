@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /admin/
+Disallow: /workstream/
+Disallow: /checkout/
+Disallow: /payouts/
+
+Sitemap: https://workperhour.com/sitemap.xml

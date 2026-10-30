@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build & bundle outputs
+dist/
+server.js
+*.tsbuildinfo
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data, PGlite WAL/PID files, and uploads
+data/pgdata/
+data/uploads/
+*.pid
+*.wal
+
+# Diagnostic & runtime logs
+logs/
+logs123/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary archives & editor artifacts
+public/assets/aistudio/
+*.zip
+.DS_Store
+.idea/
+.vscode/
