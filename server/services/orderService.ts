@@ -116,10 +116,10 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
     if (hasSpecificUsers) {
       const distinctIds = Array.from(new Set(userIds.filter(Boolean))).sort();
       if (distinctIds.length > 0) {
-        // Consistent Lock Order: 1. Lock Wallets sorted by user_id
-        await dbRunner.query(`SELECT user_id FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE`, [distinctIds]);
-        // 2. Lock Active Escrows sorted by order_id
+        // Unified Lock Order: 1. Lock Active Escrows sorted by order_id ASC
         await dbRunner.query(`SELECT order_id FROM escrows WHERE buyer_id = ANY($1::text[]) AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`, [distinctIds]);
+        // 2. Lock Wallets sorted by user_id ASC
+        await dbRunner.query(`SELECT user_id FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE`, [distinctIds]);
 
         await dbRunner.query(`
           UPDATE users u
@@ -159,10 +159,10 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
         `, [distinctIds]);
       }
     } else {
-      // Consistent Lock Order: 1. Lock all Wallets sorted by user_id
-      await dbRunner.query(`SELECT user_id FROM wallets ORDER BY user_id ASC FOR UPDATE`);
-      // 2. Lock all Active Escrows sorted by order_id
+      // Unified Lock Order: 1. Lock all Active Escrows sorted by order_id ASC
       await dbRunner.query(`SELECT order_id FROM escrows WHERE status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`);
+      // 2. Lock all Wallets sorted by user_id ASC
+      await dbRunner.query(`SELECT user_id FROM wallets ORDER BY user_id ASC FOR UPDATE`);
 
       await dbRunner.query(`
         UPDATE users u

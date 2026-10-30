@@ -1120,11 +1120,11 @@ export class FinancialTransactionService {
       // Verify buyer wallet hold invariant and reconcile safely under lock if needed
       let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
       if (buyerHold < gross) {
-        const escSumRes = await client.query(
-          "SELECT COALESCE(SUM(remaining), 0.00) AS total_remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') FOR UPDATE",
+        const activeEscRows = await client.query(
+          "SELECT order_id, remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE",
           [escrow.buyer_id]
         );
-        const reconciledHold = Number(escSumRes.rows[0]?.total_remaining || 0);
+        const reconciledHold = Number(activeEscRows.rows.reduce((sum: number, r: any) => sum + Number(r.remaining || 0), 0).toFixed(2));
         if (reconciledHold >= gross) {
           await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [reconciledHold, escrow.buyer_id]);
           buyerHold = reconciledHold;
@@ -1291,11 +1291,11 @@ export class FinancialTransactionService {
       // Verify buyer wallet hold invariant and reconcile safely under lock if needed
       let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
       if (buyerHold < refundAmount) {
-        const escSumRes = await client.query(
-          "SELECT COALESCE(SUM(remaining), 0.00) AS total_remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') FOR UPDATE",
+        const activeEscRows = await client.query(
+          "SELECT order_id, remaining FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE",
           [escrow.buyer_id]
         );
-        const reconciledHold = Number(escSumRes.rows[0]?.total_remaining || 0);
+        const reconciledHold = Number(activeEscRows.rows.reduce((sum: number, r: any) => sum + Number(r.remaining || 0), 0).toFixed(2));
         if (reconciledHold >= refundAmount) {
           await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [reconciledHold, escrow.buyer_id]);
           buyerHold = reconciledHold;
@@ -2033,11 +2033,11 @@ export class FinancialTransactionService {
 
       // Verify pending_withdrawals invariant and reconcile safely under lock if needed
       if (pendingBal < amount) {
-        const payoutsSumRes = await client.query(
-          "SELECT COALESCE(SUM(amount), 0.00) AS total_pending FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') FOR UPDATE",
+        const activePayoutRows = await client.query(
+          "SELECT id, amount FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE",
           [payout.freelancer_id]
         );
-        const reconciledPending = Number(payoutsSumRes.rows[0]?.total_pending || 0);
+        const reconciledPending = Number(activePayoutRows.rows.reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0).toFixed(2));
         if (reconciledPending >= amount) {
           await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, payout.freelancer_id]);
           pendingBal = reconciledPending;
@@ -2098,11 +2098,11 @@ export class FinancialTransactionService {
 
       // Verify pending_withdrawals invariant and reconcile safely under lock if needed
       if (pendingBal < amount) {
-        const payoutsSumRes = await client.query(
-          "SELECT COALESCE(SUM(amount), 0.00) AS total_pending FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') FOR UPDATE",
+        const activePayoutRows = await client.query(
+          "SELECT id, amount FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE",
           [payout.freelancer_id]
         );
-        const reconciledPending = Number(payoutsSumRes.rows[0]?.total_pending || 0);
+        const reconciledPending = Number(activePayoutRows.rows.reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0).toFixed(2));
         if (reconciledPending >= amount) {
           await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, payout.freelancer_id]);
           pendingBal = reconciledPending;
@@ -2177,11 +2177,11 @@ export class FinancialTransactionService {
 
       // Verify pending_withdrawals invariant and reconcile safely under lock if needed
       if (pendingBal < amount) {
-        const payoutsSumRes = await client.query(
-          "SELECT COALESCE(SUM(amount), 0.00) AS total_pending FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') FOR UPDATE",
+        const activePayoutRows = await client.query(
+          "SELECT id, amount FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE",
           [payout.freelancer_id]
         );
-        const reconciledPending = Number(payoutsSumRes.rows[0]?.total_pending || 0);
+        const reconciledPending = Number(activePayoutRows.rows.reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0).toFixed(2));
         if (reconciledPending >= amount) {
           await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, payout.freelancer_id]);
           pendingBal = reconciledPending;
